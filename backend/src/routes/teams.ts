@@ -1181,7 +1181,7 @@ teams.patch('/exceptions/:exceptionId', authMiddleware, requireRole(['team_leade
 
     // Invalidate cache for analytics (since exception update affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Invalidate analytics cache for this team leader
       cache.deleteByUserId(user.id, ['analytics'])
@@ -1307,7 +1307,7 @@ teams.delete('/exceptions/:exceptionId', authMiddleware, requireRole(['team_lead
 
     // Invalidate cache for analytics (since exception deactivation affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Invalidate analytics cache for this team leader
       cache.deleteByUserId(user.id, ['analytics'])
@@ -2004,7 +2004,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
     }
 
     // Import cache utility
-    const { cache, CacheManager } = await import('../utils/cache')
+    const { cache, CacheManager } = await import('../utils/cache.js')
     
     // Get date filters from query params
     const startDate = c.req.query('startDate') || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0]
@@ -2779,7 +2779,7 @@ teams.get('/logs', authMiddleware, requireRole(['team_leader']), async (c) => {
     
     if (useCursor) {
       // Cursor-based pagination (more efficient for large datasets)
-      const { decodeCursor, encodeCursor } = await import('../utils/pagination')
+      const { decodeCursor, encodeCursor } = await import('../utils/pagination.js')
       
       // Decode cursor if provided
       let cursorFilter = adminClient
@@ -2896,7 +2896,7 @@ teams.get('/logs', authMiddleware, requireRole(['team_leader']), async (c) => {
     
     if (useCursor) {
       // Cursor-based pagination response
-      const { encodeCursor } = await import('../utils/pagination')
+      const { encodeCursor } = await import('../utils/pagination.js')
       
       let nextCursor: string | undefined = undefined
       if (hasMore && formattedLogs.length > 0) {

@@ -1078,7 +1078,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
     }
 
     // Import cache utility
-    const { cache, CacheManager } = await import('../utils/cache')
+    const { cache, CacheManager } = await import('../utils/cache.js')
     
     // Get date filters from query params
     const startDate = c.req.query('startDate') || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0]
@@ -1912,7 +1912,7 @@ supervisor.get('/incidents', authMiddleware, requireRole(['supervisor']), async 
     
     if (useCursor) {
       // Cursor-based pagination (more efficient for large datasets)
-      const { decodeCursor, encodeCursor } = await import('../utils/pagination')
+      const { decodeCursor, encodeCursor } = await import('../utils/pagination.js')
       
       // Decode cursor if provided
       let cursorFilter = query.order('created_at', { ascending: false })
@@ -2073,7 +2073,7 @@ supervisor.get('/incidents', authMiddleware, requireRole(['supervisor']), async 
     
     if (useCursor) {
       // Cursor-based pagination response
-      const { encodeCursor } = await import('../utils/pagination')
+      const { encodeCursor } = await import('../utils/pagination.js')
       
       let nextCursor: string | undefined = undefined
       if (hasMore && formattedIncidents.length > 0) {
@@ -2363,7 +2363,7 @@ supervisor.post('/incidents', authMiddleware, requireRole(['supervisor']), async
 
     // Invalidate cache for analytics (since exception affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Invalidate supervisor analytics
       cache.deleteByUserId(user.id, ['supervisor-analytics'])
@@ -2620,7 +2620,7 @@ supervisor.patch('/incidents/:incidentId/close', authMiddleware, requireRole(['s
 
     // Invalidate cache for analytics (since incident closure affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Invalidate supervisor analytics
       cache.deleteByUserId(user.id, ['supervisor-analytics'])

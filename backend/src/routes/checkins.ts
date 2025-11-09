@@ -1070,7 +1070,7 @@ checkins.post('/', authMiddleware, requireRole(['worker']), async (c) => {
 
     // Invalidate cache for analytics (since new check-in affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Invalidate analytics cache for team leader (if worker is in a team)
       if (teamMember?.team_id) {

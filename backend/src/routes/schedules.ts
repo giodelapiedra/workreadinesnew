@@ -505,7 +505,7 @@ schedules.post('/workers', authMiddleware, requireRole(['team_leader']), async (
 
     // Invalidate cache for analytics (since new schedule affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Invalidate analytics cache for this team leader
       cache.deleteByUserId(user.id, ['analytics'])
@@ -841,7 +841,7 @@ schedules.put('/workers/:id', authMiddleware, requireRole(['team_leader']), asyn
 
     // Invalidate cache for analytics (since schedule update affects analytics)
     try {
-      const { cache } = await import('../utils/cache')
+      const { cache } = await import('../utils/cache.js')
       
       // Get team_id from updated schedule
       const { data: updatedSchedule } = await adminClient

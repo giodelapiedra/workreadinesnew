@@ -103,7 +103,7 @@ whs.get('/cases', authMiddleware, requireRole(['whs_control_center']), async (c)
     
     if (useCursor) {
       // Cursor-based pagination (more efficient for large datasets)
-      const { decodeCursor, encodeCursor } = await import('../utils/pagination')
+      const { decodeCursor, encodeCursor } = await import('../utils/pagination.js')
       
       // Decode cursor if provided
       let cursorFilter = query.order('created_at', { ascending: false })
@@ -312,7 +312,7 @@ whs.get('/cases', authMiddleware, requireRole(['whs_control_center']), async (c)
     
     if (useCursor) {
       // Cursor-based pagination response
-      const { encodeCursor } = await import('../utils/pagination')
+      const { encodeCursor } = await import('../utils/pagination.js')
       
       let nextCursor: string | undefined = undefined
       if (hasMore && formattedCases.length > 0) {
