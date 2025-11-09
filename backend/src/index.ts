@@ -11,6 +11,7 @@ import schedules from './routes/schedules'
 import whs from './routes/whs'
 import clinician from './routes/clinician'
 import worker from './routes/worker'
+import admin from './routes/admin'
 
 const app = new Hono()
 
@@ -62,12 +63,15 @@ app.route('/api/clinician', clinician)
 // Worker routes
 app.route('/api/worker', worker)
 
+// Admin routes
+app.route('/api/admin', admin)
+
 // Example API route
 app.get('/api', (c) => {
   return c.json({ message: 'Hello from Hono backend!' })
 })
 
-const port = 3000
+const port = Number(process.env.PORT) || 3000
 console.log(`Server is running on port ${port}`)
 
 serve({

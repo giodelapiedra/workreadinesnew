@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt'
 import { supabase } from '../lib/supabase'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth'
 import { getAdminClient } from '../utils/adminClient'
+import { generateUniqueQuickLoginCode } from '../utils/quickLoginCode'
 
 const teams = new Hono<{ Variables: AuthVariables }>()
 
@@ -346,6 +347,11 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
       return c.json({ error: 'Email and password are required' }, 400)
     }
 
+    // Team leaders can only create worker accounts
+    if (role !== 'worker') {
+      return c.json({ error: 'Team leaders can only create worker accounts. Contact administrator for other roles.' }, 403)
+    }
+
     // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
     if (!emailRegex.test(email)) {
@@ -478,6 +484,11 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
       full_name: fullName, // Store for backward compatibility
       business_name: teamLeaderData?.business_name || null, // Inherit from team leader
       created_at: new Date().toISOString(),
+    }
+
+    // Auto-generate quick login code for workers
+    if (role === 'worker') {
+      userInsertData.quick_login_code = await generateUniqueQuickLoginCode()
     }
 
     // Create user record in database using admin client (bypasses RLS)
@@ -672,7 +683,8 @@ teams.delete('/members/:memberId', authMiddleware, requireRole(['team_leader']),
 
     const memberId = c.req.param('memberId')
 
-    // Verify team leader owns this team
+    // Verify team leader owns this team and get member's role
+    const adminClient = getAdminClient()
     const { data: member, error: memberError } = await supabase
       .from('team_members')
       .select(`
@@ -691,6 +703,22 @@ teams.delete('/members/:memberId', authMiddleware, requireRole(['team_leader']),
     const team = Array.isArray(member.teams) ? member.teams[0] : member.teams
     if (!team || team.team_leader_id !== user.id) {
       return c.json({ error: 'Team member not found or unauthorized' }, 404)
+    }
+
+    // Get member's role to check if they are a worker
+    const { data: userData, error: userError } = await adminClient
+      .from('users')
+      .select('role')
+      .eq('id', member.user_id)
+      .single()
+
+    if (userError || !userData) {
+      return c.json({ error: 'Failed to fetch user data' }, 500)
+    }
+
+    // Prevent team leaders from deleting workers - only admin can delete workers
+    if (userData.role === 'worker') {
+      return c.json({ error: 'Cannot remove worker. Only administrators can delete worker accounts.' }, 403)
     }
 
     // Remove from team (don't delete user, just remove from team)
@@ -1166,7 +1194,7 @@ teams.patch('/exceptions/:exceptionId', authMiddleware, requireRole(['team_leade
         .single()
       
       if (supervisorData?.supervisor_id) {
-        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics', 'team-leaders-performance'])
+        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
       }
     } catch (cacheError: any) {
       console.error('[PATCH /teams/exceptions/:exceptionId] Error invalidating cache:', cacheError)
@@ -1292,7 +1320,7 @@ teams.delete('/exceptions/:exceptionId', authMiddleware, requireRole(['team_lead
         .single()
       
       if (supervisorData?.supervisor_id) {
-        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics', 'team-leaders-performance'])
+        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
       }
     } catch (cacheError: any) {
       console.error('[DELETE /teams/exceptions/:exceptionId] Error invalidating cache:', cacheError)

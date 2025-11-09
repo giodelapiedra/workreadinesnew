@@ -1,15 +1,22 @@
 import { Hono } from 'hono'
 import { setCookie, getCookie } from 'hono/cookie'
 import bcrypt from 'bcrypt'
+import crypto from 'crypto'
 import { supabase } from '../lib/supabase'
 import { authMiddleware, requireRole, AuthVariables, COOKIE_NAMES } from '../middleware/auth'
 import { sanitizeInput, isValidEmail, isValidName, isValidPassword } from '../middleware/security'
 import { getAdminClient } from '../utils/adminClient'
 import { ensureUserRecordExists } from '../utils/userUtils'
+import { generateUniqueQuickLoginCode, isValidQuickLoginCode } from '../utils/quickLoginCode'
 
 // Helper function to set secure cookies
 function setSecureCookies(c: any, accessToken: string, refreshToken: string, expiresAt: number, userId: string) {
   const isProduction = process.env.NODE_ENV === 'production'
+  
+  // SECURITY: Use 'Lax' for development, 'Strict' for production
+  // 'Lax' allows cookies to be sent on top-level navigations (needed for localhost)
+  // 'Strict' is more secure but can cause issues in development
+  const sameSite = isProduction ? 'Strict' : 'Lax'
   
   // expiresAt is in seconds since epoch (Unix timestamp)
   // Calculate maxAge properly
@@ -27,11 +34,13 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
     maxAge = 3600
   }
   
+  console.log(`[setSecureCookies] Setting cookies for user: ${userId}, sameSite: ${sameSite}, secure: ${isProduction}`)
+  
   // Set access token cookie with proper expiration
   setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, accessToken, {
     httpOnly: true,
     secure: isProduction, // Only use Secure flag in production (HTTPS)
-    sameSite: 'Strict', // Prevents CSRF and cross-site cookie access
+    sameSite: sameSite, // 'Lax' for dev, 'Strict' for production
     maxAge: maxAge, // 1 hour default, up to 7 days based on token expiration
     path: '/',
   })
@@ -41,7 +50,7 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
   setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, refreshToken, {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'Strict',
+    sameSite: sameSite,
     maxAge: refreshTokenMaxAge,
     path: '/',
   })
@@ -51,22 +60,25 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
   setCookie(c, COOKIE_NAMES.USER_ID, userId, {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'Strict',
+    sameSite: sameSite,
     maxAge: refreshTokenMaxAge, // Same as refresh token
     path: '/',
   })
+  
+  console.log(`[setSecureCookies] Cookies set successfully - access_token: ${accessToken.substring(0, 20)}..., refresh_token: ${refreshToken.substring(0, 20)}...`)
 }
 
 // Helper function to clear cookies securely
 function clearCookies(c: any) {
   const isProduction = process.env.NODE_ENV === 'production'
+  const sameSite = isProduction ? 'Strict' : 'Lax' // Match setSecureCookies
   
   // Clear access token cookie - set maxAge to 0 and empty value
   // Setting maxAge to 0 tells the browser to delete the cookie immediately
   setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, '', {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'Strict',
+    sameSite: sameSite,
     maxAge: 0, // Expires immediately - browser will delete the cookie
     path: '/',
   })
@@ -75,7 +87,7 @@ function clearCookies(c: any) {
   setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'Strict',
+    sameSite: sameSite,
     maxAge: 0, // Expires immediately - browser will delete the cookie
     path: '/',
   })
@@ -84,7 +96,7 @@ function clearCookies(c: any) {
   setCookie(c, COOKIE_NAMES.USER_ID, '', {
     httpOnly: true,
     secure: isProduction,
-    sameSite: 'Strict',
+    sameSite: sameSite,
     maxAge: 0, // Expires immediately - browser will delete the cookie
     path: '/',
   })
@@ -121,7 +133,7 @@ auth.post('/register', async (c) => {
     }
     
     // Validate role
-    const validRoles = ['worker', 'supervisor', 'whs_control_center', 'executive', 'clinician', 'team_leader']
+    const validRoles = ['worker', 'supervisor', 'whs_control_center', 'executive', 'clinician', 'team_leader', 'admin']
     if (!role || !validRoles.includes(role)) {
       return c.json({ error: `Invalid role. Must be one of: ${validRoles.join(', ')}` }, 400)
     }
@@ -200,6 +212,11 @@ auth.post('/register', async (c) => {
       full_name: fullName, // Store for backward compatibility
       password_hash: hashedPassword, // Store hashed password (additional security layer)
       created_at: new Date().toISOString(),
+    }
+
+    // Auto-generate quick login code for workers
+    if (role === 'worker') {
+      userInsertData.quick_login_code = await generateUniqueQuickLoginCode()
     }
 
     // Add business fields for supervisors
@@ -291,37 +308,59 @@ auth.post('/login', async (c) => {
 
     console.log(`[POST /login] Login attempt for email: ${email}`)
 
-    // Verify credentials with Supabase Auth
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+    // Try Supabase Auth first (simplest approach)
+    let { data: authData, error: authError } = await supabase.auth.signInWithPassword({
       email,
       password,
     })
 
-    if (authError || !authData.user || !authData.session) {
+    // If Supabase Auth fails, check if user has password_hash (might be out of sync)
+    if (authError || !authData?.session) {
+      const adminClient = getAdminClient()
+      const { data: userWithHash } = await adminClient
+        .from('users')
+        .select('id, email, password_hash')
+        .eq('email', email)
+        .maybeSingle()
+
+      // If user has password_hash, verify and sync with Supabase Auth
+      if (userWithHash?.password_hash) {
+        const passwordValid = await bcrypt.compare(password, userWithHash.password_hash)
+        
+        if (passwordValid) {
+          // Sync Supabase Auth password to match database
+          await supabase.auth.admin.updateUserById(userWithHash.id, { password })
+          
+          // Retry sign in
+          const retry = await supabase.auth.signInWithPassword({ email, password })
+          if (!retry.error && retry.data?.session) {
+            authData = retry.data
+            authError = null
+          }
+        }
+      }
+
+      // If still failed, return error
+      if (authError || !authData?.session) {
       console.log(`[POST /login] Login failed for email: ${email}, error: ${authError?.message}`)
       return c.json({ error: 'Invalid email or password' }, 401)
     }
+    }
 
-    console.log(`[POST /login] Login successful for user: ${authData.user.id} (${authData.user.email}), session token: ${authData.session.access_token.substring(0, 20)}...`)
-
-    // Get user role from database
-    let { data: userData, error: dbError } = await supabase
+    // Get user data from database
+    const adminClient = getAdminClient()
+    let { data: userData } = await adminClient
       .from('users')
       .select('id, email, role, first_name, last_name, full_name')
       .eq('id', authData.user.id)
-      .single()
+      .maybeSingle()
 
-    // If user not found in database but auth is valid, auto-create user record
-    if ((dbError || !userData) && authData.user.email) {
-      const autoCreatedUser = await ensureUserRecordExists(authData.user.id, authData.user.email)
-      if (!autoCreatedUser) {
+    // Auto-create user record if not found
+    if (!userData) {
+      userData = await ensureUserRecordExists(authData.user.id, authData.user.email || email)
+      if (!userData) {
         return c.json({ error: 'User setup incomplete. Please contact administrator.' }, 500)
       }
-      userData = autoCreatedUser
-    }
-
-    if (!userData) {
-      return c.json({ error: 'User not found' }, 404)
     }
 
     // Set secure cookies
@@ -333,16 +372,11 @@ auth.post('/login', async (c) => {
       userData.id
     )
 
-    // NOTE: Password verification is handled by Supabase Auth above
-    // No need for redundant bcrypt check - Supabase Auth already verified the password correctly
-
-    console.log(`[POST /login] Cookies set for user: ${userData.id} (${userData.email}), role: ${userData.role}`)
+    console.log(`[POST /login] Login successful for user: ${userData.id} (${userData.email})`)
 
     // Record login log (non-blocking - don't fail login if this fails)
     try {
       const userAgent = c.req.header('user-agent') || 'unknown'
-      
-      const adminClient = getAdminClient()
       await adminClient
         .from('login_logs')
         .insert([{
@@ -350,7 +384,8 @@ auth.post('/login', async (c) => {
           email: userData.email,
           role: userData.role,
           user_agent: userAgent,
-        }])
+          login_method: 'email_password',
+        }] as any)
     } catch (logError) {
       // Log error but don't fail login
       console.error('[POST /login] Failed to record login log:', logError)
@@ -382,40 +417,245 @@ auth.post('/login', async (c) => {
   }
 })
 
+// Quick login endpoint (workers only - 6-digit code)
+auth.post('/quick-login', async (c) => {
+  try {
+    const { quick_login_code } = await c.req.json()
+
+    if (!quick_login_code || typeof quick_login_code !== 'string') {
+      return c.json({ error: 'Quick login code is required' }, 400)
+    }
+
+    // Validate code format (must be 6 digits)
+    if (!isValidQuickLoginCode(quick_login_code)) {
+      return c.json({ error: 'Invalid quick login code format. Must be 6 digits.' }, 400)
+    }
+
+    const trimmedCode = quick_login_code.trim()
+
+    // Log attempt (mask code for security - only show first 2 digits)
+    console.log(`[POST /quick-login] Quick login attempt for code: ${trimmedCode.substring(0, 2)}****`)
+
+    // Find user by quick login code (workers only)
+    // Optimized: Uses index on quick_login_code for fast lookup
+    // Security: Role check in query prevents non-workers from using quick login
+    const adminClient = getAdminClient()
+    // Optimized: Uses composite index (quick_login_code, role) for fast lookup
+    // Use maybeSingle() to avoid error if not found (handled gracefully below)
+    const { data: userData, error: dbError } = await adminClient
+      .from('users')
+      .select('id, email, role, first_name, last_name, full_name')
+      .eq('quick_login_code', trimmedCode)
+      .eq('role', 'worker')
+      .maybeSingle()
+
+    if (dbError || !userData) {
+      // Log failure (mask code for security)
+      console.log(`[POST /quick-login] Quick login failed for code: ${trimmedCode.substring(0, 2)}****, error: ${dbError?.message || 'User not found'}`)
+      
+      // Record failed attempt (non-blocking)
+      try {
+        const userAgent = c.req.header('user-agent') || 'unknown'
+        await adminClient
+          .from('login_logs')
+          .insert([{
+            email: null,
+            role: 'worker',
+            user_agent: userAgent,
+            login_method: 'quick_login_code_failed',
+            notes: 'Failed quick login attempt',
+          }] as any)
+      } catch (logError) {
+        // Non-blocking - don't fail login if logging fails
+        console.error('[POST /quick-login] Failed to record login log:', logError)
+      }
+      
+      // Return generic error (don't reveal if code exists or not)
+      return c.json({ error: 'Invalid quick login code' }, 401)
+    }
+
+    if (!userData.email) {
+      return c.json({ error: 'User email not found' }, 404)
+    }
+
+    // Create session using temporary password (same pattern as regular login)
+    const randomBytes = crypto.randomBytes(16).toString('base64').replace(/[+/=]/g, '')
+    const tempPassword = randomBytes.slice(0, 20) + 'A1!@#'
+    
+    // Update password and sign in to get session
+    const { error: updateError } = await supabase.auth.admin.updateUserById(userData.id, {
+      password: tempPassword,
+    })
+
+    if (updateError) {
+      console.error('[POST /quick-login] Error updating password:', updateError)
+      return c.json({ error: 'Failed to create session. Please contact administrator.' }, 500)
+    }
+
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+      email: userData.email,
+      password: tempPassword,
+    })
+
+    if (signInError || !signInData.session) {
+      console.error('[POST /quick-login] Error signing in:', signInError)
+      return c.json({ error: 'Failed to create session. Please contact administrator.' }, 500)
+    }
+
+    // Set secure cookies
+    setSecureCookies(
+      c,
+      signInData.session.access_token,
+      signInData.session.refresh_token,
+      signInData.session.expires_at || 0,
+      userData.id
+    )
+    
+    // Session created and cookies set
+    console.log(`[POST /quick-login] Quick login successful for user: ${userData.id} (${userData.email})`)
+
+    // Record login (non-blocking)
+    try {
+      const userAgent = c.req.header('user-agent') || 'unknown'
+      await adminClient
+        .from('login_logs')
+        .insert([{
+          user_id: userData.id,
+          email: userData.email,
+          role: userData.role,
+          user_agent: userAgent,
+          login_method: 'quick_login_code',
+        }] as any)
+    } catch (logError) {
+      // Don't fail login if logging fails
+      console.error('[POST /quick-login] Failed to record login log:', logError)
+    }
+
+    // Derive full_name if not set (backward compatibility)
+    const fullName = userData.full_name || 
+                     (userData.first_name && userData.last_name 
+                       ? `${userData.first_name} ${userData.last_name}` 
+                       : userData.email?.split('@')[0] || 'User')
+
+    return c.json({
+      message: 'Quick login successful',
+      user: {
+        id: userData.id,
+        email: userData.email,
+        role: userData.role,
+        first_name: userData.first_name || '',
+        last_name: userData.last_name || '',
+        full_name: fullName,
+        phone: null, // Phone is stored in team_members table, not users table
+      },
+      // Cookies are set automatically - no need to return tokens
+      // Tokens are stored securely in HttpOnly cookies
+    })
+  } catch (error: any) {
+    console.error('Quick login error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
 // Logout endpoint (doesn't require auth - allows logout even with expired tokens)
+// SECURITY: Properly invalidates session and clears all cookies
 auth.post('/logout', async (c) => {
   try {
-    // Get token before clearing (for logging purposes)
+    // Get token before clearing (for logging and invalidation)
     const token = c.req.header('Authorization')?.replace('Bearer ', '') || 
                   getCookie(c, COOKIE_NAMES.ACCESS_TOKEN)
+    const refreshToken = getCookie(c, COOKIE_NAMES.REFRESH_TOKEN)
     
     // Get user info before clearing (for logging)
     let userId = 'unknown'
+    let userEmail = 'unknown'
+    
     if (token) {
       try {
-        const { data: { user } } = await supabase.auth.getUser(token)
-        if (user) {
+        const { data: { user }, error: userError } = await supabase.auth.getUser(token)
+        if (user && !userError) {
           userId = user.id
+          userEmail = user.email || 'unknown'
           console.log(`[POST /logout] Logging out user: ${user.id} (${user.email})`)
+          
+          // SECURITY: Invalidate the refresh token on Supabase side
+          // This ensures the session cannot be reused even if cookies are somehow recovered
+          if (refreshToken) {
+            try {
+              // Call Supabase Auth API to revoke the refresh token
+              const supabaseUrl = process.env.SUPABASE_URL || ''
+              const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+              
+              if (supabaseUrl && supabaseServiceKey) {
+                await fetch(`${supabaseUrl}/auth/v1/logout`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'apikey': supabaseServiceKey,
+                    'Authorization': `Bearer ${supabaseServiceKey}`,
+                  },
+                  body: JSON.stringify({ refresh_token: refreshToken }),
+                }).catch(err => {
+                  // Non-blocking - log but don't fail logout
+                  console.warn('[POST /logout] Failed to revoke refresh token on Supabase:', err)
+                })
+              }
+            } catch (revokeError) {
+              // Non-blocking - log but don't fail logout
+              console.warn('[POST /logout] Error revoking refresh token:', revokeError)
+            }
+          }
         }
       } catch (e) {
-        // Token might be expired, that's ok
+        // Token might be expired, that's ok - we'll still clear cookies
+        console.log('[POST /logout] Token expired or invalid, proceeding with cookie cleanup')
       }
     }
     
-    // Clear cookies only for this specific session
-    // DO NOT call supabase.auth.admin.signOut(user.id) as it invalidates ALL sessions for that user
-    // Each browser/incognito window should have independent sessions
+    // SECURITY: Clear all cookies (access token, refresh token, user_id)
+    // This removes the session from the browser
     clearCookies(c)
     
-    console.log(`[POST /logout] Cookies cleared for user: ${userId}`)
+    // SECURITY: Also clear any potential Authorization header by setting empty cookie
+    // This ensures no residual authentication data remains
+    const isProduction = process.env.NODE_ENV === 'production'
+    const sameSite = isProduction ? 'Strict' : 'Lax' // Match setSecureCookies
+    setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, '', {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: sameSite,
+      maxAge: 0,
+      path: '/',
+    })
+    setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: sameSite,
+      maxAge: 0,
+      path: '/',
+    })
+    setCookie(c, COOKIE_NAMES.USER_ID, '', {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: sameSite,
+      maxAge: 0,
+      path: '/',
+    })
+    
+    console.log(`[POST /logout] Logout successful - cookies cleared and session invalidated for user: ${userId}`)
 
-    return c.json({ message: 'Logged out successfully' })
+    return c.json({ 
+      message: 'Logged out successfully',
+      success: true 
+    })
   } catch (error: any) {
-    // Even if there's an error, clear cookies
+    // SECURITY: Even if there's an error, clear cookies to ensure logout
     console.error('[POST /logout] Error during logout:', error)
     clearCookies(c)
-    return c.json({ message: 'Logged out successfully' })
+    return c.json({ 
+      message: 'Logged out successfully',
+      success: true 
+    })
   }
 })
 
@@ -507,7 +747,14 @@ auth.post('/refresh', async (c) => {
     // If user not found in database but token is valid, auto-create user record
     if ((dbError || !userData) && refreshedTokens.user_id) {
       // Get user email from Supabase Auth
-      const { data: { user: authUser } } = await supabase.auth.getUser(refreshedTokens.access_token)
+      let authUser: any = null
+      try {
+        const result = await supabase.auth.getUser(refreshedTokens.access_token)
+        authUser = result.data?.user
+      } catch (networkError: any) {
+        console.warn(`[refreshAccessToken] Network error getting user: ${networkError.message || 'Connection timeout'}`)
+        // Continue without user email - use user_id only
+      }
       
       if (authUser?.email) {
         const autoCreatedUser = await ensureUserRecordExists(refreshedTokens.user_id, authUser.email)
@@ -553,9 +800,21 @@ auth.get('/me', async (c) => {
     // First, try to get token
     const token = getCookie(c, COOKIE_NAMES.ACCESS_TOKEN)
     const refreshToken = getCookie(c, COOKIE_NAMES.REFRESH_TOKEN)
+    const userId = getCookie(c, COOKIE_NAMES.USER_ID)
 
+    // DEBUG: Log cookie status
+    console.log(`[GET /me] Cookie check - access_token: ${token ? 'present' : 'missing'} (${token ? token.substring(0, 20) + '...' : 'N/A'}), refresh_token: ${refreshToken ? 'present' : 'missing'}, user_id: ${userId || 'missing'}`)
+
+    // SECURITY: If no valid tokens but user_id exists, clear stale cookies
     if (!token && !refreshToken) {
       console.log('[GET /me] No authentication credentials found in cookies')
+      
+      // If user_id exists but no tokens, this is a stale session - clear it
+      if (userId) {
+        console.log(`[GET /me] Stale session detected - user_id present but no tokens. Clearing stale cookies for user: ${userId}`)
+        clearCookies(c)
+      }
+      
       return c.json({ error: 'No authentication credentials' }, 401)
     }
 
@@ -564,6 +823,7 @@ auth.get('/me', async (c) => {
 
     // Try to verify the access token
     if (currentToken) {
+      try {
       const { data: { user: tokenUser }, error: tokenError } = await supabase.auth.getUser(currentToken)
       
       if (!tokenError && tokenUser) {
@@ -572,6 +832,11 @@ auth.get('/me', async (c) => {
       } else if (tokenError) {
         // Token is invalid, will try to refresh below
         console.log(`[GET /me] Access token invalid for token: ${currentToken.substring(0, 20)}..., error: ${tokenError.message}`)
+        }
+      } catch (networkError: any) {
+        // Handle network errors (timeout, connection issues)
+        console.warn(`[GET /me] Network error verifying token: ${networkError.message || 'Connection timeout'}`)
+        // Continue to try refresh token below
       }
     } else {
       console.log('[GET /me] No access token found, will try refresh token')
@@ -594,17 +859,25 @@ auth.get('/me', async (c) => {
         )
         
         // Verify the new token and get user
+        try {
         const { data: { user: refreshedUser }, error: userError } = await supabase.auth.getUser(refreshedTokens.access_token)
         
         if (!userError && refreshedUser) {
           user = refreshedUser
           currentToken = refreshedTokens.access_token
           console.log(`[GET /me] Refreshed user verified: ${refreshedUser.id} (${refreshedUser.email})`)
-        } else {
+          } else if (userError) {
+            console.warn(`[GET /me] Error getting user after refresh: ${userError.message}`)
           // Token refresh worked but can't get user - clear cookies
-          console.error(`[GET /me] Token refreshed but cannot get user: ${userError?.message}`)
           clearCookies(c)
           return c.json({ error: 'Invalid session' }, 401)
+          }
+        } catch (networkError: any) {
+          // Handle network errors gracefully
+          console.warn(`[GET /me] Network error getting user after refresh: ${networkError.message || 'Connection timeout'}`)
+          // Network error - use user_id from refreshed tokens and get user from database
+          // Don't fail - continue to get user from database below
+          currentToken = refreshedTokens.access_token
         }
       } else {
         // Both token and refresh failed - clear cookies
@@ -655,7 +928,12 @@ auth.get('/me', async (c) => {
             details: 'User exists in authentication but database record could not be created or accessed.'
           }, 500)
         }
-          userData = autoCreatedUser
+          // Add missing fields for type compatibility
+          userData = {
+            ...autoCreatedUser,
+            business_name: null,
+            business_registration_number: null,
+          }
         }
       } else {
         // Admin query failed for other reasons

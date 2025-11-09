@@ -3,41 +3,9 @@ import { supabase } from '../lib/supabase'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth'
 import { getCaseStatusFromNotes } from '../utils/caseStatus'
 import { getAdminClient } from '../utils/adminClient'
+import { parseTime, compareTime, formatDateString, parseDateString } from '../utils/dateTime'
 
-// Helper: Parse time string (HH:MM) to hours and minutes
-function parseTime(timeStr: string): { hours: number; minutes: number } {
-  const [hours, minutes] = timeStr.split(':').map(Number)
-  return { hours, minutes }
-}
-
-// Helper: Compare two times (HH:MM format)
-function compareTime(time1: string, time2: string): number {
-  const t1 = parseTime(time1)
-  const t2 = parseTime(time2)
-  if (t1.hours !== t2.hours) return t1.hours - t2.hours
-  return t1.minutes - t2.minutes
-}
-
-
-// Format date as YYYY-MM-DD string (no timezone conversion)
-const formatDateString = (date: Date): string => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-// Parse date string (YYYY-MM-DD) to Date object (local timezone)
-const parseDateString = (dateStr: string): Date => {
-  const parts = dateStr.split('T')[0].split('-')
-  if (parts.length !== 3) throw new Error('Invalid date format')
-  const year = parseInt(parts[0])
-  const month = parseInt(parts[1]) - 1
-  const day = parseInt(parts[2])
-  const date = new Date(year, month, day)
-  date.setHours(0, 0, 0, 0)
-  return date
-}
+// Date/time utilities are now imported from '../utils/dateTime'
 
 // Helper: Determine shift type from start and end time
 function getShiftType(startTime: string, endTime?: string): 'morning' | 'afternoon' | 'night' | 'flexible' {
@@ -226,9 +194,10 @@ async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
 
   // PRIORITY 1: Check worker_schedules table first (individual worker schedules)
   // Check both single-date schedules and recurring schedules
-  const targetDayOfWeek = target.getDay()
+  // NOTE: Supports ALL days of week (0=Sunday, 1=Monday, ..., 6=Saturday) - INCLUDING WEEKENDS
+  const targetDayOfWeek = target.getDay() // 0-6: Sunday=0, Monday=1, ..., Saturday=6
   
-  // First, check for single-date schedule
+  // First, check for single-date schedule (works for ANY date including weekends)
   const { data: singleDateSchedule, error: singleDateError } = await adminClient
     .from('worker_schedules')
     .select('*')
@@ -256,17 +225,21 @@ async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
       .from('worker_schedules')
       .select('*')
       .eq('worker_id', userId)
-      .eq('day_of_week', targetDayOfWeek)
+      .eq('day_of_week', targetDayOfWeek) // Matches any day 0-6 (including weekends: Saturday=6, Sunday=0)
       .eq('is_active', true)
       .is('scheduled_date', null) // Only recurring schedules
-      .lte('effective_date', targetStr) // Effective date should be <= target date
+      // Removed .lte('effective_date', targetStr) - filter in memory to handle future effective dates
       .order('start_time', { ascending: true })
 
-    // Filter in memory to handle expiry_date (can be NULL or >= target)
+    // Filter in memory to handle both effective_date and expiry_date (can be NULL or future dates)
+    // This ensures schedules with future effective_date are still considered
     if (!recurringError && recurringSchedule && recurringSchedule.length > 0) {
       recurringSchedule = recurringSchedule.filter((schedule: any) => {
+        // Effective date should be NULL (always active) OR <= target date
         // Expiry date should be NULL (ongoing) OR >= target date
-        return !schedule.expiry_date || schedule.expiry_date >= targetStr
+        const effectiveOk = !schedule.effective_date || schedule.effective_date <= targetStr
+        const expiryOk = !schedule.expiry_date || schedule.expiry_date >= targetStr
+        return effectiveOk && expiryOk
       })
       
       // Use the first matching schedule
@@ -328,6 +301,174 @@ async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
     checkInWindow: getCheckInWindow('flexible'),
     scheduleSource: 'none' as const, // No schedule assigned
   }
+}
+
+// OPTIMIZED: Get next shift info by fetching all schedules once and calculating in memory
+// This reduces from 730+ database queries to just 1 query
+async function getNextShiftInfoOptimized(userId: string, startFromDate: Date = new Date()): Promise<{
+  hasShift: boolean
+  shiftType: 'morning' | 'afternoon' | 'night' | 'flexible'
+  shiftStart?: string
+  shiftEnd?: string
+  checkInWindow: { windowStart: string; windowEnd: string; recommendedStart: string; recommendedEnd: string }
+  scheduleSource?: 'team_leader' | 'none' | 'flexible'
+  date?: string
+  dayName?: string
+  formattedDate?: string
+  requiresDailyCheckIn?: boolean
+} | null> {
+  const adminClient = getAdminClient()
+  const startDateStr = formatDateString(startFromDate)
+  
+  // Fetch ALL active schedules for this worker ONCE (instead of querying per day)
+  const { data: allSchedules, error } = await adminClient
+    .from('worker_schedules')
+    .select('*')
+    .eq('worker_id', userId)
+    .eq('is_active', true)
+    .order('start_time', { ascending: true })
+
+  if (error) {
+    console.error(`[getNextShiftInfoOptimized] Error fetching schedules:`, error)
+    return null
+  }
+
+  if (!allSchedules || allSchedules.length === 0) {
+    return null
+  }
+
+  // OPTIMIZED: Single pass to separate schedules (more efficient than multiple filters)
+  const singleDateSchedules: any[] = []
+  const recurringSchedulesByDay = new Map<number, any[]>() // Group by day_of_week for O(1) lookup
+  
+  for (const schedule of allSchedules) {
+    if (schedule.scheduled_date && !schedule.day_of_week) {
+      // Single-date schedule
+      if (schedule.scheduled_date >= startDateStr) {
+        singleDateSchedules.push(schedule)
+      }
+    } else if (!schedule.scheduled_date && schedule.day_of_week !== null) {
+      // Recurring schedule - group by day_of_week for faster lookup
+      const dayOfWeek = schedule.day_of_week
+      if (!recurringSchedulesByDay.has(dayOfWeek)) {
+        recurringSchedulesByDay.set(dayOfWeek, [])
+      }
+      recurringSchedulesByDay.get(dayOfWeek)!.push(schedule)
+    }
+  }
+
+  // Check single-date schedules first (usually fewer, sort by date for efficiency)
+  if (singleDateSchedules.length > 0) {
+    singleDateSchedules.sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date))
+    const schedule = singleDateSchedules[0]
+    const shiftType = getShiftType(schedule.start_time, schedule.end_time)
+    let checkInWindow
+    if (schedule.requires_daily_checkin && schedule.daily_checkin_start_time && schedule.daily_checkin_end_time) {
+      checkInWindow = {
+        windowStart: schedule.daily_checkin_start_time,
+        windowEnd: schedule.daily_checkin_end_time,
+        recommendedStart: schedule.daily_checkin_start_time,
+        recommendedEnd: schedule.daily_checkin_end_time,
+      }
+    } else if (schedule.check_in_window_start && schedule.check_in_window_end) {
+      checkInWindow = {
+        windowStart: schedule.check_in_window_start,
+        windowEnd: schedule.check_in_window_end,
+        recommendedStart: schedule.check_in_window_start,
+        recommendedEnd: schedule.check_in_window_end,
+      }
+    } else {
+      checkInWindow = getCheckInWindow(shiftType, schedule.start_time, schedule.end_time)
+    }
+
+    const targetDate = parseDateString(schedule.scheduled_date)
+    return {
+      hasShift: true,
+      shiftType,
+      shiftStart: schedule.start_time,
+      shiftEnd: schedule.end_time,
+      checkInWindow,
+      scheduleSource: 'team_leader' as const,
+      requiresDailyCheckIn: schedule.requires_daily_checkin || false,
+      date: schedule.scheduled_date,
+      dayName: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][targetDate.getDay()],
+      formattedDate: targetDate.toLocaleDateString('en-US', { 
+        weekday: 'long', 
+        month: 'long', 
+        day: 'numeric',
+        year: 'numeric'
+      }),
+    }
+  }
+
+  // OPTIMIZED: Check recurring schedules - use Map for O(1) day lookup instead of nested loop
+  // NOTE: Supports ALL days including weekends (Saturday=6, Sunday=0)
+  // Start from dayOffset=0 to include today, then check future days
+  const maxDaysToCheck = 730 // 2 years max
+  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+  
+  for (let dayOffset = 0; dayOffset <= maxDaysToCheck; dayOffset++) {
+    const checkDate = new Date(startFromDate)
+    checkDate.setDate(checkDate.getDate() + dayOffset)
+    const checkDateStr = formatDateString(checkDate)
+    const dayOfWeek = checkDate.getDay() // 0-6: Sunday=0, Monday=1, ..., Saturday=6
+
+    // OPTIMIZED: Use Map for O(1) lookup instead of iterating through all schedules
+    const schedulesForDay = recurringSchedulesByDay.get(dayOfWeek)
+    if (!schedulesForDay || schedulesForDay.length === 0) {
+      continue // Skip if no schedules for this day
+    }
+
+    // Find first matching schedule for this day (check effective_date and expiry_date)
+    for (const schedule of schedulesForDay) {
+      // Check effective_date and expiry_date
+      const effectiveOk = !schedule.effective_date || schedule.effective_date <= checkDateStr
+      const expiryOk = !schedule.expiry_date || schedule.expiry_date >= checkDateStr
+      
+      if (effectiveOk && expiryOk) {
+        // Found next recurring schedule
+        const shiftType = getShiftType(schedule.start_time, schedule.end_time)
+        let checkInWindow
+        if (schedule.requires_daily_checkin && schedule.daily_checkin_start_time && schedule.daily_checkin_end_time) {
+          checkInWindow = {
+            windowStart: schedule.daily_checkin_start_time,
+            windowEnd: schedule.daily_checkin_end_time,
+            recommendedStart: schedule.daily_checkin_start_time,
+            recommendedEnd: schedule.daily_checkin_end_time,
+          }
+        } else if (schedule.check_in_window_start && schedule.check_in_window_end) {
+          checkInWindow = {
+            windowStart: schedule.check_in_window_start,
+            windowEnd: schedule.check_in_window_end,
+            recommendedStart: schedule.check_in_window_start,
+            recommendedEnd: schedule.check_in_window_end,
+          }
+        } else {
+          checkInWindow = getCheckInWindow(shiftType, schedule.start_time, schedule.end_time)
+        }
+
+        return {
+          hasShift: true,
+          shiftType,
+          shiftStart: schedule.start_time,
+          shiftEnd: schedule.end_time,
+          checkInWindow,
+          scheduleSource: 'team_leader' as const,
+          requiresDailyCheckIn: schedule.requires_daily_checkin || false,
+          date: checkDateStr,
+          dayName: dayNames[dayOfWeek],
+          formattedDate: checkDate.toLocaleDateString('en-US', { 
+            weekday: 'long', 
+            month: 'long', 
+            day: 'numeric',
+            year: 'numeric'
+          }),
+        }
+      }
+    }
+  }
+
+  return null
 }
 
 const checkins = new Hono<{ Variables: AuthVariables }>()
@@ -661,33 +802,13 @@ checkins.get('/dashboard', authMiddleware, requireRole(['worker']), async (c) =>
     // Get today's shift info
     const todayShiftInfo = await getWorkerShiftInfo(user.id)
 
-    // Get next shift info (up to 14 days ahead)
-    let nextShiftInfo = null
-    let nextShiftDate: Date | null = null
-    
-    for (let i = 1; i <= 14; i++) {
-      const nextDate = new Date()
-      nextDate.setDate(nextDate.getDate() + i)
-      const shiftInfo = await getWorkerShiftInfo(user.id, nextDate)
-      
-      if (shiftInfo.hasShift) {
-        nextShiftInfo = shiftInfo
-        nextShiftDate = nextDate
-        break
-      }
-    }
+    // OPTIMIZED: Get next shift info using optimized function (1 query instead of 14-730 queries)
+    // If today has a schedule, find the NEXT one after today. Otherwise, find the next one including today.
+    // This ensures Saturday/Sunday schedules are found correctly
+    const searchStartDate = todayShiftInfo.hasShift ? new Date(Date.now() + 24 * 60 * 60 * 1000) : new Date() // Tomorrow if today has schedule, else today
+    const nextShiftData = await getNextShiftInfoOptimized(user.id, searchStartDate)
 
-    const nextShift = nextShiftInfo && nextShiftDate ? {
-      ...nextShiftInfo,
-      date: nextShiftDate.toISOString().split('T')[0],
-      dayName: dayNames[nextShiftDate.getDay()],
-      formattedDate: nextShiftDate.toLocaleDateString('en-US', { 
-        weekday: 'long', 
-        month: 'long', 
-        day: 'numeric',
-        year: 'numeric'
-      }),
-    } : {
+    const nextShift = nextShiftData || {
       hasShift: false,
       shiftType: 'flexible' as const,
       checkInWindow: getCheckInWindow('flexible'),
@@ -735,35 +856,11 @@ checkins.get('/next-shift-info', authMiddleware, requireRole(['worker']), async 
     const tomorrow = new Date()
     tomorrow.setDate(tomorrow.getDate() + 1)
 
-    // Try to find next scheduled shift (up to 14 days ahead to catch weekly patterns)
-    let nextShiftInfo = null
-    let nextShiftDate: Date | null = null
-    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-    
-    for (let i = 1; i <= 14; i++) {
-      const nextDate = new Date()
-      nextDate.setDate(nextDate.getDate() + i)
-      const shiftInfo = await getWorkerShiftInfo(user.id, nextDate)
-      
-      if (shiftInfo.hasShift) {
-        nextShiftInfo = shiftInfo
-        nextShiftDate = nextDate
-        break
-      }
-    }
+    // OPTIMIZED: Use optimized function (1 query instead of 14 queries)
+    const nextShiftData = await getNextShiftInfoOptimized(user.id, tomorrow)
 
-    if (nextShiftInfo && nextShiftDate) {
-      return c.json({
-        ...nextShiftInfo,
-        date: nextShiftDate.toISOString().split('T')[0],
-        dayName: dayNames[nextShiftDate.getDay()],
-        formattedDate: nextShiftDate.toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          month: 'long', 
-          day: 'numeric',
-          year: 'numeric'
-        }),
-      })
+    if (nextShiftData) {
+      return c.json(nextShiftData)
     }
 
     return c.json({
@@ -995,7 +1092,7 @@ checkins.post('/', authMiddleware, requireRole(['worker']), async (c) => {
             .single()
           
           if (supervisorData?.supervisor_id) {
-            cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics', 'team-leaders-performance'])
+            cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
           }
         }
       }

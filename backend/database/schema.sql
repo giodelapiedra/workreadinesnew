@@ -2,7 +2,7 @@
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
   email TEXT UNIQUE NOT NULL,
-  role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker', 'supervisor', 'whs_control_center', 'executive', 'clinician', 'team_leader')),
+  role TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker', 'supervisor', 'whs_control_center', 'executive', 'clinician', 'team_leader', 'admin')),
   password_hash TEXT,
   first_name TEXT, -- Will be populated by migration for existing users
   last_name TEXT, -- Will be populated by migration for existing users

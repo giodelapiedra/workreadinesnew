@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth'
 import { getCaseStatusFromNotes, mapCaseStatusToDisplay, isValidCaseStatus } from '../utils/caseStatus'
 import { getAdminClient } from '../utils/adminClient'
+import { formatDateString, parseDateString } from '../utils/dateTime'
 
 const clinician = new Hono<{ Variables: AuthVariables }>()
 
@@ -12,26 +13,6 @@ const debugLog = (...args: any[]) => {
   if (isDebugMode) {
     console.log(...args)
   }
-}
-
-// Format date as YYYY-MM-DD string (no timezone conversion)
-const formatDateString = (date: Date): string => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-// Parse date string (YYYY-MM-DD) to Date object (local timezone)
-const parseDateString = (dateStr: string): Date => {
-  const parts = dateStr.split('T')[0].split('-')
-  if (parts.length !== 3) throw new Error('Invalid date format')
-  const year = parseInt(parts[0])
-  const month = parseInt(parts[1]) - 1
-  const day = parseInt(parts[2])
-  const date = new Date(year, month, day)
-  date.setHours(0, 0, 0, 0)
-  return date
 }
 
 // Format user full name

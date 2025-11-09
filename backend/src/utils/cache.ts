@@ -132,7 +132,7 @@ export class CacheManager {
    */
   deleteByUserId(userId: string, prefixes?: string[]): number {
     let deleted = 0
-    const prefixesToCheck = prefixes || ['analytics', 'supervisor-analytics', 'team-leaders-performance']
+    const prefixesToCheck = prefixes || ['analytics', 'supervisor-analytics']
     
     for (const prefix of prefixesToCheck) {
       for (const key of this.cache.keys()) {

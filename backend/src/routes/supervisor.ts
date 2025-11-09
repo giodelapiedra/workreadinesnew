@@ -1435,16 +1435,52 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
     const totalCheckIns = uniqueCheckInsSet.size // Count unique worker+date combinations, not total check-ins
     const overallCompletionRate = totalExpectedCheckIns > 0 ? Math.round((totalCheckIns / totalExpectedCheckIns) * 100 * 10) / 10 : 0
 
+    // Calculate readiness based on unique workers (not total check-ins)
+    // For each worker, get their latest check-in status in the date range
+    const workerLatestStatus = new Map<string, { status: string; date: string }>()
+    validCheckIns.forEach((checkIn: any) => {
+      const workerId = checkIn.user_id
+      const checkInDate = checkIn.check_in_date
+      const existing = workerLatestStatus.get(workerId)
+      
+      // Keep the latest check-in status for each worker
+      if (!existing || checkInDate > existing.date) {
+        workerLatestStatus.set(workerId, {
+          status: checkIn.predicted_readiness,
+          date: checkInDate
+        })
+      }
+    })
+    
+    // Count workers by their latest readiness status
+    let greenWorkers = 0
+    let amberWorkers = 0
+    let redWorkers = 0
+    
+    workerLatestStatus.forEach((data) => {
+      const status = data.status
+      if (status === 'Green') {
+        greenWorkers++
+      } else if (status === 'Yellow' || status === 'Amber') {
+        amberWorkers++
+      } else if (status === 'Red') {
+        redWorkers++
+      }
+    })
+    
+    const totalWorkersWithReadiness = greenWorkers + amberWorkers + redWorkers
+    
+    // Calculate percentages based on workers, not check-ins
+    const overallReadiness = {
+      green: totalWorkersWithReadiness > 0 ? Math.round((greenWorkers / totalWorkersWithReadiness) * 100) : 0,
+      amber: totalWorkersWithReadiness > 0 ? Math.round((amberWorkers / totalWorkersWithReadiness) * 100) : 0,
+      red: totalWorkersWithReadiness > 0 ? Math.round((redWorkers / totalWorkersWithReadiness) * 100) : 0,
+    }
+    
+    // Keep check-in counts for distribution (for display purposes)
     const green = validCheckIns.filter((c: any) => c.predicted_readiness === 'Green').length
     const amber = validCheckIns.filter((c: any) => c.predicted_readiness === 'Yellow' || c.predicted_readiness === 'Amber').length
     const red = validCheckIns.filter((c: any) => c.predicted_readiness === 'Red').length
-    const totalReadiness = green + amber + red
-
-    const overallReadiness = {
-      green: totalReadiness > 0 ? Math.round((green / totalReadiness) * 100) : 0,
-      amber: totalReadiness > 0 ? Math.round((amber / totalReadiness) * 100) : 0,
-      red: totalReadiness > 0 ? Math.round((red / totalReadiness) * 100) : 0,
-    }
 
     // Count active members (without exceptions on end date)
     const activeWorkers = allWorkerIds.filter(workerId => {
@@ -1585,15 +1621,23 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
       dailyTrends = dailyTrends.filter((_, index) => index % sampleRate === 0)
     }
 
-    // Readiness distribution (current status)
+    // Readiness distribution (for date range - used by Overall Readiness chart)
+    // This should match the overallReadiness percentages which are now calculated based on workers (latest status)
+    const readinessDistribution = {
+      green: greenWorkers, // Number of workers with Green status (latest check-in)
+      amber: amberWorkers, // Number of workers with Amber status (latest check-in)
+      red: redWorkers, // Number of workers with Red status (latest check-in)
+      pending: 0, // Not applicable for date range distribution
+    }
+    
+    // Also calculate today's status for reference (if needed elsewhere)
     const today = new Date().toISOString().split('T')[0]
     const todayCheckIns = validCheckIns.filter((c: any) => c.check_in_date === today)
     const todayActiveWorkers = allWorkerIds.filter(workerId => {
       const workerExceptions = exceptionsByWorker.get(workerId) || []
       return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, new Date(today)))
     })
-
-    const readinessDistribution = {
+    const todayReadinessDistribution = {
       green: todayCheckIns.filter((c: any) => c.predicted_readiness === 'Green').length,
       amber: todayCheckIns.filter((c: any) => c.predicted_readiness === 'Yellow' || c.predicted_readiness === 'Amber').length,
       red: todayCheckIns.filter((c: any) => c.predicted_readiness === 'Red').length,
@@ -2322,7 +2366,7 @@ supervisor.post('/incidents', authMiddleware, requireRole(['supervisor']), async
       const { cache } = await import('../utils/cache')
       
       // Invalidate supervisor analytics
-      cache.deleteByUserId(user.id, ['supervisor-analytics', 'team-leaders-performance'])
+      cache.deleteByUserId(user.id, ['supervisor-analytics'])
       
       // Also invalidate team leader analytics
       const { data: teamData } = await adminClient
@@ -2579,7 +2623,7 @@ supervisor.patch('/incidents/:incidentId/close', authMiddleware, requireRole(['s
       const { cache } = await import('../utils/cache')
       
       // Invalidate supervisor analytics
-      cache.deleteByUserId(user.id, ['supervisor-analytics', 'team-leaders-performance'])
+      cache.deleteByUserId(user.id, ['supervisor-analytics'])
       
       // Also invalidate team leader analytics
       const { data: teamData } = await adminClient
@@ -2881,417 +2925,6 @@ supervisor.get('/my-incidents', authMiddleware, requireRole(['supervisor']), asy
   }
 })
 
-// Get team leaders performance data for supervisor
-// Shows completion rates, expected vs actual check-ins based on their schedules
-// Uses caching for improved performance
-supervisor.get('/team-leaders/performance', authMiddleware, requireRole(['supervisor']), async (c) => {
-  try {
-    const user = c.get('user')
-    if (!user) {
-      return c.json({ error: 'Unauthorized' }, 401)
-    }
-
-    // Import cache utility
-    const { cache, CacheManager } = await import('../utils/cache')
-    
-    // Get date filters from query params (default: current month)
-    const today = new Date()
-    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1)
-    const startDate = c.req.query('startDate') || startOfMonth.toISOString().split('T')[0]
-    const endDate = c.req.query('endDate') || today.toISOString().split('T')[0]
-
-    // Generate cache key
-    const cacheKey = CacheManager.generateKey('team-leaders-performance', {
-      userId: user.id,
-      startDate,
-      endDate,
-    })
-
-    // Try to get from cache (5 minute TTL)
-    const cached = cache.get(cacheKey)
-    if (cached) {
-      return c.json(cached, 200, {
-        'X-Cache': 'HIT',
-        'Cache-Control': 'public, max-age=300',
-      })
-    }
-
-    const adminClient = getAdminClient()
-
-    // Limit date range to prevent excessive data fetching (max 90 days)
-    const startDateObj = new Date(startDate)
-    const endDateObj = new Date(endDate)
-    const daysDiff = Math.ceil((endDateObj.getTime() - startDateObj.getTime()) / (1000 * 60 * 60 * 24))
-    if (daysDiff > 90) {
-      return c.json({ error: 'Date range cannot exceed 90 days' }, 400)
-    }
-
-    // Get all teams assigned to this supervisor
-    const { data: assignedTeams, error: teamsError } = await adminClient
-      .from('teams')
-      .select('id, name, site_location, team_leader_id')
-      .eq('supervisor_id', user.id)
-
-    if (teamsError) {
-      console.error('Error fetching assigned teams:', teamsError)
-      return c.json({ error: 'Failed to fetch assigned teams', details: teamsError.message }, 500)
-    }
-
-    if (!assignedTeams || assignedTeams.length === 0) {
-      return c.json({ teamLeaders: [], dateRange: { startDate, endDate } })
-    }
-
-    const teamLeaderIds = assignedTeams.map(t => t.team_leader_id).filter(Boolean)
-    
-    // Get team leader details
-    const { data: teamLeaders, error: leadersError } = await adminClient
-      .from('users')
-      .select('id, email, first_name, last_name, full_name')
-      .in('id', teamLeaderIds)
-
-    if (leadersError) {
-      console.error('Error fetching team leaders:', leadersError)
-      return c.json({ error: 'Failed to fetch team leaders', details: leadersError.message }, 500)
-    }
-
-    // Get all team members from supervisor's teams
-    const { data: allTeamMembers, error: membersError } = await adminClient
-      .from('team_members')
-      .select('user_id, team_id')
-      .in('team_id', assignedTeams.map(t => t.id))
-
-    if (membersError) {
-      console.error('Error fetching team members:', membersError)
-      return c.json({ error: 'Failed to fetch team members', details: membersError.message }, 500)
-    }
-
-    // Create map: team_id -> team_leader_id
-    const teamToLeaderMap = new Map<string, string>()
-    assignedTeams.forEach(team => {
-      teamToLeaderMap.set(team.id, team.team_leader_id)
-    })
-
-    // Create map: team_leader_id -> worker_ids (team members)
-    const leaderToWorkersMap = new Map<string, string[]>()
-    ;(allTeamMembers || []).forEach(member => {
-      const teamLeaderId = teamToLeaderMap.get(member.team_id)
-      if (teamLeaderId) {
-        if (!leaderToWorkersMap.has(teamLeaderId)) {
-          leaderToWorkersMap.set(teamLeaderId, [])
-        }
-        leaderToWorkersMap.get(teamLeaderId)!.push(member.user_id)
-      }
-    })
-
-    // Get all worker IDs
-    const allWorkerIds = (allTeamMembers || []).map(tm => tm.user_id)
-
-    // Get all worker schedules (individual schedules from worker_schedules table)
-    // Supports both single-date and recurring schedules
-    const [schedulesResult, checkInsResult] = await Promise.all([
-      adminClient
-        .from('worker_schedules')
-        .select('worker_id, scheduled_date, day_of_week, effective_date, expiry_date, is_active, team_id')
-        .in('worker_id', allWorkerIds),
-      adminClient
-      .from('daily_checkins')
-      .select('user_id, check_in_date, check_in_time, shift_start_time, shift_type')
-      .in('user_id', allWorkerIds.length > 0 ? allWorkerIds : ['00000000-0000-0000-0000-000000000000'])
-      .gte('check_in_date', startDate)
-      .lte('check_in_date', endDate)
-    ])
-
-    const allWorkerSchedules = schedulesResult.data || []
-    const checkIns = checkInsResult.data || []
-
-    // Calculate date range for schedule processing
-    const start = new Date(startDate)
-    const end = new Date(endDate)
-    end.setHours(23, 59, 59, 999)
-
-    // Create a map: date -> Set of worker IDs with schedules on that date
-    // Only includes ACTIVE schedules for accurate completion rate calculation
-    const schedulesByDate = new Map<string, Set<string>>()
-    
-    // Filter to only ACTIVE schedules
-    const activeSchedules = (allWorkerSchedules || []).filter((s: any) => s.is_active === true)
-    
-    // Process schedules to build the date map (supports both single-date and recurring)
-    activeSchedules.forEach((schedule: any) => {
-      // Single-date schedule
-      if (schedule.scheduled_date && (schedule.day_of_week === null || schedule.day_of_week === undefined)) {
-        const scheduleDate = new Date(schedule.scheduled_date)
-        if (scheduleDate >= start && scheduleDate <= end) {
-      const dateStr = schedule.scheduled_date
-      if (!schedulesByDate.has(dateStr)) {
-        schedulesByDate.set(dateStr, new Set())
-      }
-      schedulesByDate.get(dateStr)!.add(schedule.worker_id)
-        }
-      }
-      // Recurring schedule: calculate all matching dates
-      else if (schedule.day_of_week !== null && schedule.day_of_week !== undefined) {
-        const effectiveDate = schedule.effective_date ? new Date(schedule.effective_date) : start
-        const expiryDate = schedule.expiry_date ? new Date(schedule.expiry_date) : end
-        expiryDate.setHours(23, 59, 59, 999)
-        
-        const scheduleStart = effectiveDate > start ? effectiveDate : start
-        const scheduleEnd = expiryDate < end ? expiryDate : end
-        
-        // Calculate all dates that match the day_of_week within the effective range
-        for (let d = new Date(scheduleStart); d <= scheduleEnd; d.setDate(d.getDate() + 1)) {
-          const dayOfWeek = d.getDay() // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-          
-          // Check if this date matches the schedule's day_of_week
-          if (dayOfWeek === schedule.day_of_week) {
-            const dateStr = d.toISOString().split('T')[0]
-            if (!schedulesByDate.has(dateStr)) {
-              schedulesByDate.set(dateStr, new Set())
-            }
-            schedulesByDate.get(dateStr)!.add(schedule.worker_id)
-          }
-        }
-      }
-    })
-    
-    // Add check-ins (preserve workers with check-ins even if schedule was deleted)
-    checkIns.forEach((checkIn: any) => {
-      const dateStr = checkIn.check_in_date
-      if (!schedulesByDate.has(dateStr)) {
-        schedulesByDate.set(dateStr, new Set())
-    }
-      schedulesByDate.get(dateStr)!.add(checkIn.user_id)
-    })
-
-    // Check-ins already fetched above in Promise.all
-
-    // Create map: worker_id -> team_leader_id
-    const workerToLeaderMap = new Map<string, string>()
-    assignedTeams.forEach(team => {
-      const teamWorkers = (allTeamMembers || []).filter(tm => tm.team_id === team.id)
-      teamWorkers.forEach(tm => {
-        workerToLeaderMap.set(tm.user_id, team.team_leader_id)
-      })
-    })
-
-    // Count check-ins per team leader (total count of all team members' check-ins)
-    // Use Set to track unique check-ins (worker_id + date) to avoid double counting
-    const checkInsByLeader = new Map<string, Set<string>>()
-    const lastCheckInByLeader = new Map<string, string>() // Track latest check-in date per team leader
-    ;(checkIns || []).forEach((checkIn: any) => {
-      const teamLeaderId = workerToLeaderMap.get(checkIn.user_id)
-      if (teamLeaderId) {
-        if (!checkInsByLeader.has(teamLeaderId)) {
-          checkInsByLeader.set(teamLeaderId, new Set())
-          lastCheckInByLeader.set(teamLeaderId, checkIn.check_in_date)
-        }
-        // Use unique key: worker_id + date to count each worker's check-in per day
-        const uniqueKey = `${checkIn.user_id}-${checkIn.check_in_date}`
-        checkInsByLeader.get(teamLeaderId)!.add(uniqueKey)
-        
-        // Update latest check-in date if this is more recent
-        const currentLast = lastCheckInByLeader.get(teamLeaderId) || ''
-        if (checkIn.check_in_date > currentLast) {
-          lastCheckInByLeader.set(teamLeaderId, checkIn.check_in_date)
-        }
-      }
-    })
-
-    // Helper function to check if a worker is scheduled to work on a specific date
-    // Uses the schedulesByDate map which includes both single-date and recurring schedules (active only)
-    const isWorkerScheduledOnDate = (workerId: string, checkDate: Date): boolean => {
-      const dateStr = checkDate.toISOString().split('T')[0]
-
-      // Check if worker has an individual schedule for this date (from pre-fetched map)
-      const workersWithScheduleOnDate = schedulesByDate.get(dateStr) || new Set()
-      return workersWithScheduleOnDate.has(workerId)
-    }
-
-    // Helper function to check if a date has any scheduled workers for a team leader
-    // This is used to count expected days for team leader performance
-    // Uses the schedulesByDate map which includes both single-date and recurring schedules (active only)
-    const hasScheduledWorkersOnDate = (teamLeaderId: string, checkDate: Date): boolean => {
-      const teamWorkerIds = leaderToWorkersMap.get(teamLeaderId) || []
-      if (teamWorkerIds.length === 0) return false
-      
-      const dateStr = checkDate.toISOString().split('T')[0]
-
-      // Check if any worker from this team leader has a schedule on this date
-      const workersWithScheduleOnDate = schedulesByDate.get(dateStr) || new Set()
-      return teamWorkerIds.some(workerId => workersWithScheduleOnDate.has(workerId))
-    }
-
-    // Calculate expected check-in days for each team leader
-    // Expected = number of days when at least one worker from the team has an assigned schedule
-    const performanceData = (teamLeaders || []).map(leader => {
-      const team = assignedTeams.find(t => t.team_leader_id === leader.id)
-      const teamWorkerIds = leaderToWorkersMap.get(leader.id) || []
-      
-      // Calculate expected days - count days when at least one worker has an assigned schedule
-      // This is based on individual worker schedules, not team leader's default schedule
-      let expectedDays = 0
-      const currentDate = new Date(startDateObj)
-      while (currentDate <= endDateObj) {
-        if (hasScheduledWorkersOnDate(leader.id, currentDate)) {
-          expectedDays++
-        }
-        currentDate.setDate(currentDate.getDate() + 1)
-      }
-
-      // Get team members' check-ins for this team leader
-      // CRITICAL: Only count check-ins from workers who have assigned schedules on that date
-      // This ensures actualDays accurately reflects compliance with individual worker schedules
-      const teamCheckIns = (checkIns || []).filter(checkIn => {
-        // Must be from this team's workers
-        if (!teamWorkerIds.includes(checkIn.user_id)) {
-          return false
-        }
-        
-        // MUST be on a date when the worker has an assigned schedule
-        // This is the key filter - we only count check-ins on days when the worker has an individual schedule
-        const checkInDate = new Date(checkIn.check_in_date)
-        const isScheduled = isWorkerScheduledOnDate(checkIn.user_id, checkInDate)
-        
-        // Only include if the worker has an assigned schedule on the check-in date
-        return isScheduled
-      })
-
-      // Count actual check-ins based on team leader's schedule
-      // actualDays = number of scheduled days (according to team leader's schedule) that have at least one check-in
-      // We count unique dates (not worker-date combinations) because:
-      // - A day is considered "complete" if at least one team member checked in on that scheduled day
-      // - This gives us: "How many of the team leader's scheduled days had at least one worker check in?"
-      const uniqueCheckInDates = new Set<string>()
-      
-      // All check-ins in teamCheckIns are already filtered to be from workers with assigned schedules only
-      teamCheckIns.forEach((checkIn: any) => {
-        const checkInDate = checkIn.check_in_date
-        
-        // Double-check: verify this worker has a schedule on this date (safety check)
-        const checkDate = new Date(checkInDate)
-        if (!isWorkerScheduledOnDate(checkIn.user_id, checkDate)) {
-          return // Skip if somehow worker has no schedule on this date (shouldn't happen, but safety)
-        }
-        
-        // Count this date as having a check-in
-        uniqueCheckInDates.add(checkInDate)
-      })
-
-      // actualDays = number of scheduled days (per team leader's schedule) that had at least one check-in
-      const actualDays = uniqueCheckInDates.size
-
-      // Calculate completion percentage
-      const completionRate = expectedDays > 0 
-        ? Math.round((actualDays / expectedDays) * 100 * 10) / 10 
-        : 0
-
-      // Determine status
-      let status: 'on_track' | 'at_risk' | 'off_track' = 'on_track'
-      if (completionRate < 70) {
-        status = 'off_track'
-      } else if (completionRate < 90) {
-        status = 'at_risk'
-      }
-
-      // Calculate days ahead/behind
-      const variance = actualDays - expectedDays
-      const varianceText = variance > 0 
-        ? `+${variance} days ahead`
-        : variance < 0 
-          ? `${Math.abs(variance)} days behind`
-          : 'On schedule'
-
-      // Calculate weekly attendance (last 7 days from end date)
-      const weeklyEndDate = new Date(endDateObj)
-      const weeklyStartDate = new Date(weeklyEndDate)
-      weeklyStartDate.setDate(weeklyStartDate.getDate() - 6)
-      
-      let weeklyExpected = 0
-      let weeklyActual = 0
-      const weeklyCheckInDates = new Set<string>()
-      
-      for (let d = new Date(weeklyStartDate); d <= weeklyEndDate; d.setDate(d.getDate() + 1)) {
-        if (hasScheduledWorkersOnDate(leader.id, d)) {
-          weeklyExpected++
-        }
-        
-        const dateStr = d.toISOString().split('T')[0]
-        // Count unique dates that have check-ins (only scheduled days are in teamCheckIns)
-        if (teamCheckIns.some((checkIn: any) => checkIn.check_in_date === dateStr)) {
-          weeklyCheckInDates.add(dateStr)
-        }
-      }
-      
-      weeklyActual = weeklyCheckInDates.size
-      
-      const weeklyAttendanceRate = weeklyExpected > 0 
-        ? Math.round((weeklyActual / weeklyExpected) * 100 * 10) / 10 
-        : 0
-
-      const leaderName = leader.full_name || 
-        (leader.first_name && leader.last_name 
-          ? `${leader.first_name} ${leader.last_name}` 
-          : leader.email.split('@')[0])
-
-      // Count total team members
-      const totalMembers = teamWorkerIds.length
-
-      // Count total scheduled days for this team leader based on worker schedules in date range
-      // This counts days when at least one worker has an assigned schedule
-      const totalScheduledDays = expectedDays // Use expectedDays as total scheduled days in the date range
-
-      return {
-        id: leader.id,
-        name: leaderName,
-        email: leader.email,
-        teamId: team?.id || null,
-        teamName: team?.name || 'No Team',
-        siteLocation: team?.site_location || null,
-        expectedDays,
-        actualDays,
-        completionRate,
-        status,
-        variance,
-        varianceText,
-        lastCheckIn: lastCheckInByLeader.get(leader.id) || null,
-        scheduleEffective: null, // No longer using team leader's default schedule
-        scheduleExpiry: null, // No longer using team leader's default schedule
-        weeklyAttendanceRate,
-        totalCheckIns: teamCheckIns.length,
-        totalMembers,
-        totalScheduledDays,
-      }
-    })
-
-    // Sort by completion rate (lowest first, to highlight issues)
-    performanceData.sort((a, b) => a.completionRate - b.completionRate)
-
-    const responseData = {
-      teamLeaders: performanceData,
-      dateRange: { startDate, endDate },
-      summary: {
-        total: performanceData.length,
-        onTrack: performanceData.filter(tl => tl.status === 'on_track').length,
-        atRisk: performanceData.filter(tl => tl.status === 'at_risk').length,
-        offTrack: performanceData.filter(tl => tl.status === 'off_track').length,
-        avgCompletionRate: performanceData.length > 0
-          ? Math.round((performanceData.reduce((sum, tl) => sum + tl.completionRate, 0) / performanceData.length) * 10) / 10
-          : 0,
-      }
-    }
-
-    // Store in cache (5 minute TTL)
-    cache.set(cacheKey, responseData, 5 * 60 * 1000)
-
-    return c.json(responseData, 200, {
-      'X-Cache': 'MISS',
-      'Cache-Control': 'public, max-age=300',
-    })
-  } catch (error: any) {
-    console.error('[GET /supervisor/team-leaders/performance] Error:', error)
-    return c.json({ error: 'Internal server error', details: error.message }, 500)
-  }
-})
 
 // ============================================
 // Notifications Endpoints for Supervisor

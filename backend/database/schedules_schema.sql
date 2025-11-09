@@ -19,31 +19,31 @@ CREATE TABLE IF NOT EXISTS work_schedules (
 -- Enable Row Level Security
 ALTER TABLE work_schedules ENABLE ROW LEVEL SECURITY;
 
--- Drop existing policies if they exist
+-- Drop existing policies if they exist (for idempotency)
 DROP POLICY IF EXISTS "Users can view their own schedules" ON work_schedules;
 DROP POLICY IF EXISTS "Supervisors can view team leader schedules" ON work_schedules;
 DROP POLICY IF EXISTS "Supervisors can manage team leader schedules" ON work_schedules;
 DROP POLICY IF EXISTS "Service role can do everything on schedules" ON work_schedules;
+DROP POLICY IF EXISTS "Consolidated SELECT policy for work schedules" ON work_schedules;
 
--- Policies
--- Users (team leaders) can view their own schedules
-CREATE POLICY "Users can view their own schedules"
-  ON work_schedules FOR SELECT
-  USING (auth.uid() = user_id);
-
--- Supervisors can view schedules of their team leaders
-CREATE POLICY "Supervisors can view team leader schedules"
+-- OPTIMIZED POLICIES (consolidated to avoid multiple permissive policies)
+-- Consolidated SELECT policy for all roles (single permissive policy)
+CREATE POLICY "Consolidated SELECT policy for work schedules"
   ON work_schedules FOR SELECT
   USING (
+    -- Users (team leaders) can view their own schedules
+    auth.uid() = user_id
+    OR
+    -- Supervisors can view schedules of their team leaders
     EXISTS (
       SELECT 1 FROM teams
       WHERE teams.supervisor_id = auth.uid()
       AND teams.team_leader_id = work_schedules.user_id
-    ) OR
-    auth.role() = 'service_role'
+    )
   );
 
--- Supervisors can manage (INSERT/UPDATE/DELETE) schedules of their team leaders
+-- Supervisors can INSERT/UPDATE/DELETE schedules of their team leaders
+-- Separated from SELECT to avoid overlap
 CREATE POLICY "Supervisors can manage team leader schedules"
   ON work_schedules FOR ALL
   USING (
@@ -51,22 +51,17 @@ CREATE POLICY "Supervisors can manage team leader schedules"
       SELECT 1 FROM teams
       WHERE teams.supervisor_id = auth.uid()
       AND teams.team_leader_id = work_schedules.user_id
-    ) OR
-    auth.role() = 'service_role'
+    )
   )
   WITH CHECK (
     EXISTS (
       SELECT 1 FROM teams
       WHERE teams.supervisor_id = auth.uid()
       AND teams.team_leader_id = work_schedules.user_id
-    ) OR
-    auth.role() = 'service_role'
+    )
   );
 
--- Service role can do everything
-CREATE POLICY "Service role can do everything on schedules"
-  ON work_schedules FOR ALL
-  USING (auth.role() = 'service_role');
+-- Note: Service role bypasses RLS by default in Supabase, so no separate policy needed
 
 -- Create trigger for updated_at
 DROP TRIGGER IF EXISTS update_work_schedules_updated_at ON work_schedules;
