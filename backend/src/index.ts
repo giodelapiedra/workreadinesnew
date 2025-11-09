@@ -24,7 +24,10 @@ app.use('*', rateLimiter)
 const productionOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean) || []
 const developmentOrigins = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000']
 
-// In production, use configured origins + localhost (for development)
+// Vercel preview URLs pattern - allow all Vercel preview and production URLs
+const vercelPattern = /^https:\/\/.*\.vercel\.app$/
+
+// In production, use configured origins + localhost + Vercel URLs
 // In development, use localhost origins
 const allowedOrigins = process.env.NODE_ENV === 'production'
   ? [...productionOrigins, ...developmentOrigins]
@@ -35,8 +38,18 @@ app.use('/*', cors({
     // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return origin
     
-    // Check if origin is in allowed list - return origin if allowed, undefined if not
-    return allowedOrigins.includes(origin) ? origin : undefined
+    // Check if origin is in allowed list
+    if (allowedOrigins.includes(origin)) {
+      return origin
+    }
+    
+    // In production, also allow Vercel URLs (preview and production)
+    if (process.env.NODE_ENV === 'production' && vercelPattern.test(origin)) {
+      return origin
+    }
+    
+    // Not allowed
+    return undefined
   },
   credentials: true,
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
