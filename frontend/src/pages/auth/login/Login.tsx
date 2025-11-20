@@ -19,7 +19,7 @@ export function Login() {
   const [toastMessage, setToastMessage] = useState('')
   const [toastType, setToastType] = useState<'success' | 'error'>('success')
   const navigate = useNavigate()
-  const { setRole, refreshAuth } = useAuth()
+  const { setRole, refreshAuth, setUserFromLogin } = useAuth()
 
   const showToastMessage = (message: string, type: 'success' | 'error' = 'success') => {
     setToastMessage(message)
@@ -68,18 +68,36 @@ export function Login() {
       // Show success toast before redirecting
       showToastMessage('Login successful! Redirecting...', 'success')
       
-      // Set role from login response
-      setRole(result.data.user.role)
+      // MOBILE FIX: Store token in localStorage as fallback for Safari
+      // Safari on iOS often blocks cross-domain cookies, so we need this fallback
+      if ((result.data as any).token) {
+        localStorage.setItem('auth_token', (result.data as any).token)
+        if ((result.data as any).refresh_token) {
+          localStorage.setItem('auth_refresh_token', (result.data as any).refresh_token)
+        }
+        console.log('[Login] Token stored in localStorage for mobile fallback')
+      }
+      
+      // Set user state immediately from login response (before cookies are processed)
+      // This prevents redirect back to login page on mobile
+      setUserFromLogin({
+        id: result.data.user.id,
+        email: result.data.user.email,
+        role: result.data.user.role,
+        first_name: result.data.user.first_name,
+        last_name: result.data.user.last_name,
+        full_name: result.data.user.full_name,
+      })
       
       // Wait longer for cookies to be set (especially important for mobile)
       // Mobile browsers need more time to process cross-domain cookies
-      await new Promise(resolve => setTimeout(resolve, 1000))
+      await new Promise(resolve => setTimeout(resolve, 1500))
       
-      // Refresh auth to ensure user state is fully loaded
-      await refreshAuth()
-      
-      // Additional wait to ensure auth state is updated
-      await new Promise(resolve => setTimeout(resolve, 300))
+      // Refresh auth in background to get full user data (non-blocking)
+      refreshAuth().catch(err => {
+        console.warn('[EmailLogin] Background refreshAuth failed:', err)
+        // Don't block navigation - user is already set from login response
+      })
       
       navigate(getDashboardRoute(result.data.user.role as any), { replace: true })
     } catch (err: any) {
@@ -123,18 +141,26 @@ export function Login() {
       // Show success toast before redirecting
       showToastMessage('Login successful! Redirecting...', 'success')
       
-      // Set role from login response
-      setRole(result.data.user.role)
+      // Set user state immediately from login response (before cookies are processed)
+      // This prevents redirect back to login page
+      setUserFromLogin({
+        id: result.data.user.id,
+        email: result.data.user.email,
+        role: result.data.user.role,
+        first_name: result.data.user.first_name,
+        last_name: result.data.user.last_name,
+        full_name: result.data.user.full_name,
+      })
       
       // Wait longer for cookies to be set (especially important for mobile)
       // Mobile browsers need more time to process cross-domain cookies
-      await new Promise(resolve => setTimeout(resolve, 1000))
+      await new Promise(resolve => setTimeout(resolve, 1500))
       
-      // Refresh auth to ensure user state is fully loaded
-      await refreshAuth()
-      
-      // Additional wait to ensure auth state is updated
-      await new Promise(resolve => setTimeout(resolve, 300))
+      // Refresh auth in background to get full user data (non-blocking)
+      refreshAuth().catch(err => {
+        console.warn('[QuickLogin] Background refreshAuth failed:', err)
+        // Don't block navigation - user is already set from login response
+      })
       
       navigate(getDashboardRoute(result.data.user.role as any), { replace: true })
     } catch (err: any) {
