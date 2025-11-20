@@ -37,19 +37,30 @@ const allowedOrigins = process.env.NODE_ENV === 'production'
 app.use('/*', cors({
   origin: (origin) => {
     // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return origin
+    if (!origin) {
+      console.log('[CORS] No origin provided - allowing')
+      return origin
+    }
+    
+    console.log(`[CORS] Checking origin: ${origin}`)
     
     // Check if origin is in allowed list
     if (allowedOrigins.includes(origin)) {
+      console.log(`[CORS] Origin allowed (in list): ${origin}`)
       return origin
     }
     
     // In production, also allow Vercel URLs (preview and production)
     if (process.env.NODE_ENV === 'production' && vercelPattern.test(origin)) {
+      console.log(`[CORS] Origin allowed (Vercel pattern): ${origin}`)
       return origin
     }
     
     // Not allowed
+    console.log(`[CORS] Origin NOT allowed: ${origin}`)
+    console.log(`[CORS] Allowed origins:`, allowedOrigins)
+    console.log(`[CORS] NODE_ENV:`, process.env.NODE_ENV)
+    console.log(`[CORS] Pattern test result:`, vercelPattern.test(origin))
     return undefined
   },
   credentials: true, // CRITICAL: Must be true for cookies to work cross-domain
@@ -106,6 +117,16 @@ app.route('/api/admin', admin)
 
 // Executive routes
 app.route('/api/executive', executive)
+
+// Error handler - must be after all routes
+app.onError((err, c) => {
+  console.error('[Error Handler]', err)
+  // Always return CORS headers even on error
+  return c.json({ 
+    error: 'Internal server error', 
+    message: process.env.NODE_ENV === 'development' ? err.message : undefined 
+  }, 500)
+})
 
 // Example API route
 app.get('/api', (c) => {
