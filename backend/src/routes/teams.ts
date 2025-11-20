@@ -5,6 +5,10 @@ import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.j
 import { getAdminClient } from '../utils/adminClient.js'
 import { generateUniquePinCode } from '../utils/quickLoginCode.js'
 import { formatDateString } from '../utils/dateTime.js'
+// Import optimized utility functions
+import { getTodayDateString, getTodayDate } from '../utils/dateUtils.js'
+import { isExceptionActive } from '../utils/exceptionUtils.js'
+import { formatTeamLeader, formatUserFullName } from '../utils/userUtils.js'
 
 const teams = new Hono<{ Variables: AuthVariables }>()
 
@@ -18,10 +22,26 @@ teams.get('/all', authMiddleware, requireRole(['team_leader']), async (c) => {
 
     const adminClient = getAdminClient()
 
-    // Get all teams with their team leaders
+    // OPTIMIZATION: Get current team leader's team first to get supervisor_id
+    const { data: currentTeam } = await adminClient
+      .from('teams')
+      .select('id, supervisor_id')
+      .eq('team_leader_id', user.id)
+      .single()
+
+    if (!currentTeam) {
+      return c.json({ error: 'Team not found' }, 404)
+    }
+
+    const currentSupervisorId = currentTeam.supervisor_id
+    const currentTeamId = currentTeam.id
+
+    // OPTIMIZATION: Only fetch teams with same supervisor_id (filtered at database level)
     const { data: allTeams, error: teamsError } = await adminClient
       .from('teams')
-      .select('id, name, site_location, team_leader_id, users!teams_team_leader_id_fkey(id, email, first_name, last_name, full_name)')
+      .select('id, name, site_location, team_leader_id, supervisor_id, users!teams_team_leader_id_fkey(id, email, first_name, last_name, full_name)')
+      .eq('supervisor_id', currentSupervisorId)
+      .neq('id', currentTeamId) // Exclude current team
       .order('name', { ascending: true })
 
     if (teamsError) {
@@ -30,25 +50,24 @@ teams.get('/all', authMiddleware, requireRole(['team_leader']), async (c) => {
     }
 
     // Format teams for selection
-    const teamsList = (allTeams || []).map((team: any) => {
-      const teamLeader = Array.isArray(team.users) ? team.users[0] : team.users
-      return {
-        id: team.id,
-        name: team.name,
-        site_location: team.site_location,
-        team_leader: teamLeader ? {
-          id: teamLeader.id,
-          email: teamLeader.email,
-          name: teamLeader.full_name || 
-                (teamLeader.first_name && teamLeader.last_name 
-                  ? `${teamLeader.first_name} ${teamLeader.last_name}`
-                  : teamLeader.email),
-        } : null,
-        display_name: team.site_location 
-          ? `${team.name} • ${team.site_location}`
-          : team.name,
-      }
-    })
+    const teamsList = (allTeams || [])
+      .map((team: any) => {
+        const teamLeader = Array.isArray(team.users) ? team.users[0] : team.users
+        return {
+          id: team.id,
+          name: team.name,
+          site_location: team.site_location,
+          supervisor_id: team.supervisor_id,
+          team_leader: teamLeader ? {
+            id: teamLeader.id,
+            email: teamLeader.email,
+            name: formatUserFullName(teamLeader),
+          } : null,
+          display_name: team.site_location 
+            ? `${team.name} • ${team.site_location}`
+            : team.name,
+        }
+      })
 
     return c.json({ teams: teamsList })
   } catch (error: any) {
@@ -64,6 +83,13 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
     if (!user) {
       return c.json({ error: 'Unauthorized' }, 401)
     }
+
+    // Get query parameters for filtering and pagination
+    const roleFilter = c.req.query('role') // 'worker' or undefined
+    const searchQuery = c.req.query('search') // search string or undefined
+    const page = parseInt(c.req.query('page') || '1', 10)
+    const limit = parseInt(c.req.query('limit') || '200', 10)
+    const offset = (page - 1) * limit
 
     // Get admin client once for this request (reused for all queries)
     const adminClient = getAdminClient()
@@ -181,7 +207,7 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
       }
     }
     
-    // OPTIMIZATION: Get workers with schedules ONCE for all members
+    // OPTIMIZATION: Get workers with schedules ONCE for all members (reused for both member flags and statistics)
     const workerIdsForScheduleCheck = memberUserIds
     let workersWithSchedulesSet = new Set<string>()
     
@@ -238,7 +264,7 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
 
     // Calculate statistics (handle empty/null data gracefully)
     // Filter out members without user data or provide fallback
-    const safeMembers = membersWithUsers
+    let safeMembers = membersWithUsers
       .filter((m: any) => {
         // Only include members that have valid user data
         if (!m.users) {
@@ -272,12 +298,55 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
         }
       })
     
-    const totalMembers = safeMembers.length
+    // OPTIMIZATION: Remove duplicates based on user_id (prevent duplicate members)
+    const seenUserIds = new Set<string>()
+    safeMembers = safeMembers.filter((m: any) => {
+      if (seenUserIds.has(m.user_id)) {
+        if (process.env.NODE_ENV === 'development') {
+          console.warn(`[GET /teams] Removing duplicate member: ${m.user_id} (${m.users?.email || 'unknown'})`)
+        }
+        return false
+      }
+      seenUserIds.add(m.user_id)
+      return true
+    })
+    
+    // Store original members for statistics (before filtering)
+    const allSafeMembers = [...safeMembers]
+    const totalMembers = allSafeMembers.length
+    
+    // OPTIMIZATION: Apply role filter on backend (team leaders only see workers)
+    if (roleFilter === 'worker') {
+      safeMembers = safeMembers.filter((m: any) => m.users?.role === 'worker')
+    }
+    
+    // OPTIMIZATION: Apply search filter on backend
+    if (searchQuery && searchQuery.trim()) {
+      const searchLower = searchQuery.toLowerCase().trim()
+      safeMembers = safeMembers.filter((m: any) => {
+        if (!m.users) return false
+        
+        const name = m.users.full_name || 
+                    (m.users.first_name && m.users.last_name 
+                      ? `${m.users.first_name} ${m.users.last_name}` 
+                      : m.users.email || '')
+        const email = m.users.email || ''
+        
+        return name.toLowerCase().includes(searchLower) || 
+               email.toLowerCase().includes(searchLower)
+      })
+    }
+    
+    // Store filtered count for pagination
+    const filteredTotal = safeMembers.length
+    
+    // OPTIMIZATION: Apply pagination on backend
+    const paginatedMembers = safeMembers.slice(offset, offset + limit)
     
     // Get total exemptions and cases (optimized: parallel queries)
-    // Use safeMemberIds to avoid conflict with memberUserIds above
-    const safeMemberIds = safeMembers.map((m: any) => m.user_id)
-    const workerIds = safeMembers.filter((m: any) => m.users?.role === 'worker').map((m: any) => m.user_id)
+    // Use all members for statistics, not filtered ones
+    const safeMemberIds = allSafeMembers.map((m: any) => m.user_id)
+    const workerIds = allSafeMembers.filter((m: any) => m.users?.role === 'worker').map((m: any) => m.user_id)
     let totalExemptions = 0
     let totalCases = 0
     let activeWorkers = 0
@@ -286,7 +355,18 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
       // Parallel queries for better performance
       const incidentTypes = ['accident', 'injury', 'medical_leave', 'other']
       
-      const [exemptionsResult, casesResult, schedulesResult] = await Promise.all([
+      // OPTIMIZATION: Use already fetched schedules data instead of querying again
+      // Filter workersWithSchedulesSet to only include workers (not all members)
+      const activeWorkersSet = new Set<string>()
+      workerIds.forEach((workerId: string) => {
+        if (workersWithSchedulesSet.has(workerId)) {
+          activeWorkersSet.add(workerId)
+        }
+      })
+      activeWorkers = activeWorkersSet.size
+      
+      // OPTIMIZATION: Parallel queries for exemptions and cases only (schedules already fetched)
+      const [exemptionsResult, casesResult] = await Promise.all([
         adminClient
           .from('worker_exceptions')
           .select('*', { count: 'exact', head: true })
@@ -296,15 +376,7 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
           .select('*', { count: 'exact', head: true })
           .in('user_id', safeMemberIds)
           .in('exception_type', incidentTypes)
-          .eq('assigned_to_whs', true),
-        // Get workers with active schedules (using worker_schedules, not work_schedules)
-        workerIds.length > 0
-          ? adminClient
-              .from('worker_schedules')
-              .select('worker_id')
-              .in('worker_id', workerIds)
-              .eq('is_active', true)
-          : Promise.resolve({ data: [], error: null })
+          .eq('assigned_to_whs', true)
       ])
       
       if (!exemptionsResult.error && exemptionsResult.count !== null) {
@@ -313,14 +385,6 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
       
       if (!casesResult.error && casesResult.count !== null) {
         totalCases = casesResult.count
-      }
-      
-      // Count unique workers with active schedules
-      if (!schedulesResult.error && schedulesResult.data) {
-        const workersWithSchedules = new Set(
-          (schedulesResult.data as any[]).map((s: any) => s.worker_id)
-        )
-        activeWorkers = workersWithSchedules.size
       }
     }
 
@@ -351,9 +415,10 @@ teams.get('/', authMiddleware, requireRole(['team_leader']), async (c) => {
     return c.json({
       team: teamData,
       supervisor: supervisorInfo,
-      members: safeMembers,
+      members: paginatedMembers,
+      totalRecords: filteredTotal, // Total count after filtering but before pagination
       statistics: {
-        totalMembers,
+        totalMembers, // Total all members (for statistics)
         activeWorkers,
         totalExemptions,
         totalCases,
@@ -397,10 +462,10 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
     // Use admin client to bypass RLS
     const adminClient = getAdminClient()
 
-    // Get team leader's business_name to inherit to worker
+    // Get team leader's business_name and business_registration_number to inherit to worker
     const { data: teamLeaderData, error: teamLeaderDataError } = await adminClient
       .from('users')
-      .select('business_name')
+      .select('business_name, business_registration_number')
       .eq('id', user.id)
       .single()
 
@@ -408,6 +473,13 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
       console.error('Error fetching team leader data:', teamLeaderDataError)
       return c.json({ error: 'Failed to fetch team leader data', details: teamLeaderDataError.message }, 500)
     }
+
+    // Log team leader data for debugging
+    console.log('Team leader data for inheritance:', {
+      team_leader_id: user.id,
+      business_name: teamLeaderData?.business_name,
+      business_registration_number: teamLeaderData?.business_registration_number,
+    })
 
     // Get team leader's team
     const { data: team, error: teamError } = await adminClient
@@ -510,6 +582,14 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
     const trimmedLastName = last_name?.trim() || ''
     const fullName = `${trimmedFirstName} ${trimmedLastName}`.trim() || email.split('@')[0]
 
+    // Prepare business data - handle empty strings and null values
+    const inheritedBusinessName = teamLeaderData?.business_name
+      ? (typeof teamLeaderData.business_name === 'string' ? teamLeaderData.business_name.trim() : teamLeaderData.business_name)
+      : null
+    const inheritedBusinessRegNumber = teamLeaderData?.business_registration_number
+      ? (typeof teamLeaderData.business_registration_number === 'string' ? teamLeaderData.business_registration_number.trim() : teamLeaderData.business_registration_number)
+      : null
+
     const userInsertData: any = {
       id: authData.user.id,
       email: authData.user.email,
@@ -518,9 +598,17 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
       first_name: trimmedFirstName || email.split('@')[0],
       last_name: trimmedLastName || '',
       full_name: fullName, // Store for backward compatibility
-      business_name: teamLeaderData?.business_name || null, // Inherit from team leader
+      business_name: inheritedBusinessName || null, // Inherit from team leader
+      business_registration_number: inheritedBusinessRegNumber || null, // Inherit from team leader
       created_at: new Date().toISOString(),
     }
+
+    // Log data being inserted for debugging
+    console.log('Creating worker with data:', {
+      email: userInsertData.email,
+      business_name: userInsertData.business_name,
+      business_registration_number: userInsertData.business_registration_number,
+    })
 
     // Auto-generate quick login code for workers using lastname-number format
     if (role === 'worker') {
@@ -540,12 +628,12 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
     const { data: userData, error: userError } = await adminClient
       .from('users')
       .insert([userInsertData])
-      .select()
+      .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number')
       .single()
 
     if (userError) {
       console.error('Database insert error:', userError)
-      console.error('Error details:', JSON.stringify(userError, null, 2))
+      console.error('Failed to insert user data:', JSON.stringify(userInsertData, null, 2))
       // Clean up auth user
       await supabase.auth.admin.deleteUser(authData.user.id)
       return c.json({ 
@@ -555,6 +643,14 @@ teams.post('/members', authMiddleware, requireRole(['team_leader']), async (c) =
         hint: userError.hint 
       }, 500)
     }
+
+    // Log successful creation
+    console.log('Worker created successfully:', {
+      id: userData.id,
+      email: userData.email,
+      business_name: userData.business_name,
+      business_registration_number: userData.business_registration_number,
+    })
 
     // Add user to team using admin client (bypasses RLS)
     const { data: member, error: memberError } = await adminClient
@@ -923,6 +1019,154 @@ teams.post('/', authMiddleware, requireRole(['team_leader']), async (c) => {
 // Worker Exceptions Endpoints
 // ============================================
 
+// Helper function to get team member and verify team leader authorization
+async function getTeamMemberAndVerifyAuth(adminClient: any, memberId: string, userId: string) {
+  const { data: member, error } = await adminClient
+    .from('team_members')
+    .select('user_id, team_id, teams(team_leader_id)')
+    .eq('id', memberId)
+    .single()
+
+  if (error || !member) {
+    return { error: 'Team member not found', status: 404 }
+  }
+
+  const team = Array.isArray(member.teams) ? member.teams[0] : member.teams
+  if (!team || team.team_leader_id !== userId) {
+    return { error: 'Unauthorized', status: 403 }
+  }
+
+  return { member, team }
+}
+
+// Helper function to get exception and verify team leader authorization
+async function getExceptionAndVerifyAuth(adminClient: any, exceptionId: string, userId: string) {
+  const { data: exception, error } = await adminClient
+    .from('worker_exceptions')
+    .select('*, teams(team_leader_id), users!worker_exceptions_created_by_fkey(role)')
+    .eq('id', exceptionId)
+    .single()
+
+  if (error || !exception) {
+    return { error: 'Exception not found', status: 404 }
+  }
+
+  const team = Array.isArray(exception.teams) ? exception.teams[0] : exception.teams
+  if (!team || team.team_leader_id !== userId) {
+    return { error: 'Unauthorized', status: 403 }
+  }
+
+  return { exception, team }
+}
+
+// Helper function to validate exception modification permissions
+function validateExceptionModification(exception: any) {
+  // Check if exception is assigned to WHS
+  if (exception.assigned_to_whs) {
+    return {
+      error: 'Cannot modify exception: This exception has been assigned to WHS and must be closed by WHS first before it can be modified.',
+      status: 403
+    }
+  }
+
+  // Check if exception was created by supervisor
+  const creator = Array.isArray(exception.users) ? exception.users[0] : exception.users
+  if (creator && creator.role === 'supervisor') {
+    return {
+      error: 'Cannot modify exception: This exception was created by a Site Supervisor and cannot be modified until the supervisor closes the incident.',
+      status: 403
+    }
+  }
+
+  return null
+}
+
+// Helper function to deactivate schedules for a worker
+async function deactivateWorkerSchedules(adminClient: any, userId: string): Promise<number> {
+  try {
+    const { count: scheduleCount, error: countError } = await adminClient
+      .from('worker_schedules')
+      .select('*', { count: 'exact', head: true })
+      .eq('worker_id', userId)
+      .eq('is_active', true)
+
+    if (countError || !scheduleCount || scheduleCount === 0) {
+      return 0
+    }
+
+    const { error: deactivateError } = await adminClient
+      .from('worker_schedules')
+      .update({ is_active: false })
+      .eq('worker_id', userId)
+      .eq('is_active', true)
+
+    if (deactivateError) {
+      console.error('[deactivateWorkerSchedules] Error deactivating schedules:', deactivateError)
+      return 0
+    }
+
+    return scheduleCount
+  } catch (error: any) {
+    console.error('[deactivateWorkerSchedules] Error in schedule deactivation process:', error)
+    return 0
+  }
+}
+
+// Helper function to reactivate schedules for a worker
+async function reactivateWorkerSchedules(adminClient: any, userId: string): Promise<number> {
+  try {
+    const { count: scheduleCount, error: countError } = await adminClient
+      .from('worker_schedules')
+      .select('*', { count: 'exact', head: true })
+      .eq('worker_id', userId)
+      .eq('is_active', false)
+
+    if (countError || !scheduleCount || scheduleCount === 0) {
+      return 0
+    }
+
+    const { error: reactivateError } = await adminClient
+      .from('worker_schedules')
+      .update({ is_active: true })
+      .eq('worker_id', userId)
+      .eq('is_active', false)
+
+    if (reactivateError) {
+      console.error('[reactivateWorkerSchedules] Error reactivating schedules:', reactivateError)
+      return 0
+    }
+
+    return scheduleCount
+  } catch (error: any) {
+    console.error('[reactivateWorkerSchedules] Error in schedule reactivation process:', error)
+    return 0
+  }
+}
+
+// Helper function to invalidate analytics cache
+async function invalidateAnalyticsCache(adminClient: any, teamId: string, userId: string) {
+  try {
+    const { cache } = await import('../utils/cache.js')
+    
+    // Invalidate analytics cache for this team leader
+    cache.deleteByUserId(userId, ['analytics'])
+    
+    // Also invalidate supervisor analytics if supervisor exists
+    const { data: supervisorData } = await adminClient
+      .from('teams')
+      .select('supervisor_id')
+      .eq('id', teamId)
+      .single()
+    
+    if (supervisorData?.supervisor_id) {
+      cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
+    }
+  } catch (cacheError: any) {
+    console.error('[invalidateAnalyticsCache] Error invalidating cache:', cacheError)
+    // Don't fail the request if cache invalidation fails
+  }
+}
+
 // Get all exceptions for team members (team leader only)
 teams.get('/exceptions', authMiddleware, requireRole(['team_leader']), async (c) => {
   try {
@@ -976,7 +1220,8 @@ teams.get('/members/:memberId/exception', authMiddleware, requireRole(['team_lea
     const memberId = c.req.param('memberId')
     const adminClient = getAdminClient()
 
-    // Get team member
+    // OPTIMIZATION: Use helper function to get team member (for team leaders)
+    // For workers, do a simpler check
     const { data: member } = await adminClient
       .from('team_members')
       .select('user_id, team_id, teams(team_leader_id)')
@@ -1026,7 +1271,7 @@ teams.get('/members/:userId/check-ins', authMiddleware, requireRole(['team_leade
 
     const userId = c.req.param('userId')
     const startDate = c.req.query('startDate') || '2020-01-01'
-    const endDate = c.req.query('endDate') || new Date().toISOString().split('T')[0]
+    const endDate = c.req.query('endDate') || getTodayDateString()
     
     const adminClient = getAdminClient()
 
@@ -1095,25 +1340,16 @@ teams.post('/members/:memberId/exception', authMiddleware, requireRole(['team_le
 
     const adminClient = getAdminClient()
 
-    // Get team member and verify team leader owns this team
-    const { data: member } = await adminClient
-      .from('team_members')
-      .select('user_id, team_id, teams(team_leader_id)')
-      .eq('id', memberId)
-      .single()
-
-    if (!member) {
-      return c.json({ error: 'Team member not found' }, 404)
+    // OPTIMIZATION: Use helper function to get team member and verify authorization
+    const memberAuth = await getTeamMemberAndVerifyAuth(adminClient, memberId, user.id)
+    if (memberAuth.error) {
+      return c.json({ error: memberAuth.error }, memberAuth.status as 403 | 404)
     }
-
-    const team = Array.isArray(member.teams) ? member.teams[0] : member.teams
-    if (!team || team.team_leader_id !== user.id) {
-      return c.json({ error: 'Unauthorized' }, 403)
-    }
+    const { member, team } = memberAuth
 
     // OPTIMIZATION: Use maybeSingle to avoid error when no exception exists
     // Check if worker has an active exception - prevent modification if created by supervisor or assigned to WHS
-    const { data: existingException, error: existingError } = await adminClient
+    const { data: existingException } = await adminClient
       .from('worker_exceptions')
       .select('id, assigned_to_whs, is_active, created_by, users!worker_exceptions_created_by_fkey(role)')
       .eq('user_id', member.user_id)
@@ -1121,55 +1357,19 @@ teams.post('/members/:memberId/exception', authMiddleware, requireRole(['team_le
       .maybeSingle()
 
     if (existingException) {
-      // Check if exception is assigned to WHS
-      if (existingException.assigned_to_whs) {
-        return c.json({ 
-          error: 'Cannot modify exception: This exception has been assigned to WHS and must be closed by WHS first before it can be modified.' 
-        }, 403)
+      // OPTIMIZATION: Use helper function to validate exception modification
+      const validation = validateExceptionModification(existingException)
+      if (validation) {
+        return c.json({ error: validation.error }, validation.status as 403)
       }
-      
-      // Check if exception was created by supervisor
-      const creator = Array.isArray(existingException.users) ? existingException.users[0] : existingException.users
-      if (creator && creator.role === 'supervisor') {
-        return c.json({ 
-          error: 'Cannot modify exception: This exception was created by a Site Supervisor and cannot be modified until the supervisor closes the incident.' 
-        }, 403)
-      }
+      // If exception exists and is not assigned to WHS, allow update (will deactivate old one and create new)
+      // This is handled below by deactivating existing exception before creating new one
     }
 
-    // OPTIMIZATION: Automatically deactivate all active schedules when exception is created
-    // This uses the new worker schedule logic - schedules are soft-deleted (is_active = false)
-    // but data remains in database for analytics purposes
-    let deactivatedScheduleCount = 0
-    try {
-      // OPTIMIZATION: Use count query instead of fetching all IDs to reduce data transfer
-      const { count: scheduleCount, error: countError } = await adminClient
-        .from('worker_schedules')
-        .select('*', { count: 'exact', head: true })
-        .eq('worker_id', member.user_id)
-        .eq('is_active', true)
-      
-      if (!countError && scheduleCount && scheduleCount > 0) {
-        // Only update if there are active schedules
-        const { error: deactivateError } = await adminClient
-          .from('worker_schedules')
-          .update({ is_active: false })
-          .eq('worker_id', member.user_id)
-          .eq('is_active', true)
-
-        if (deactivateError) {
-          console.error('[POST /teams/members/:memberId/exception] Error deactivating schedules:', deactivateError)
-          // Don't fail the exception creation if schedule deactivation fails
-        } else {
-          deactivatedScheduleCount = scheduleCount
-          if (deactivatedScheduleCount > 0) {
-            console.log(`[POST /teams/members/:memberId/exception] Automatically deactivated ${deactivatedScheduleCount} active schedule(s) for worker ${member.user_id} (Exception created)`)
-          }
-        }
-      }
-    } catch (deactivateScheduleError: any) {
-      console.error('[POST /teams/members/:memberId/exception] Error in schedule deactivation process:', deactivateScheduleError)
-      // Don't fail the exception creation if schedule deactivation fails
+    // OPTIMIZATION: Use helper function to deactivate schedules
+    const deactivatedScheduleCount = await deactivateWorkerSchedules(adminClient, member.user_id)
+    if (deactivatedScheduleCount > 0) {
+      console.log(`[POST /teams/members/:memberId/exception] Automatically deactivated ${deactivatedScheduleCount} active schedule(s) for worker ${member.user_id} (Exception created)`)
     }
 
     // If transfer, verify target team exists and is different
@@ -1180,7 +1380,7 @@ teams.post('/members/:memberId/exception', authMiddleware, requireRole(['team_le
 
       const { data: targetTeam, error: targetTeamError } = await adminClient
         .from('teams')
-        .select('id, name')
+        .select('id, name, team_leader_id')
         .eq('id', transfer_to_team_id)
         .single()
 
@@ -1197,6 +1397,74 @@ teams.post('/members/:memberId/exception', authMiddleware, requireRole(['team_le
       if (transferError) {
         console.error('Error transferring worker:', transferError)
         return c.json({ error: 'Failed to transfer worker to new team', details: transferError.message }, 500)
+      }
+
+      // Notify destination team leader about the transfer
+      if (targetTeam.team_leader_id) {
+        try {
+          // Get worker and source team info for notification
+          const [workerResult, sourceTeamResult, sourceTeamLeaderResult] = await Promise.all([
+            adminClient
+              .from('users')
+              .select('id, email, first_name, last_name, full_name')
+              .eq('id', member.user_id)
+              .single(),
+            adminClient
+              .from('teams')
+              .select('id, name')
+              .eq('id', member.team_id)
+              .single(),
+            adminClient
+              .from('users')
+              .select('id, email, first_name, last_name, full_name')
+              .eq('id', user.id)
+              .single(),
+          ])
+
+          const worker = workerResult.data
+          const sourceTeam = sourceTeamResult.data
+          const sourceTeamLeader = sourceTeamLeaderResult.data
+
+          if (worker && sourceTeam && sourceTeamLeader) {
+            const workerName = formatUserFullName(worker)
+            const sourceTeamLeaderName = formatUserFullName(sourceTeamLeader)
+
+            const notification = {
+              user_id: targetTeam.team_leader_id,
+              type: 'worker_transferred',
+              title: '👤 Worker Transferred to Your Team',
+              message: `${workerName} has been transferred from ${sourceTeam.name} to ${targetTeam.name} by ${sourceTeamLeaderName}.`,
+              data: {
+                worker_id: member.user_id,
+                worker_name: workerName,
+                worker_email: worker.email || '',
+                source_team_id: member.team_id,
+                source_team_name: sourceTeam.name || '',
+                target_team_id: transfer_to_team_id,
+                target_team_name: targetTeam.name || '',
+                transferred_by: user.id,
+                transferred_by_name: sourceTeamLeaderName,
+                transfer_date: start_date,
+                reason: reason || null,
+              },
+              is_read: false,
+            }
+
+            const { error: notifyError } = await adminClient
+              .from('notifications')
+              .insert([notification])
+
+            if (notifyError) {
+              console.error('[POST /teams/members/:memberId/exception] Error creating notification for destination team leader:', notifyError)
+              // Don't fail the request if notification fails
+            } else {
+              console.log(`[POST /teams/members/:memberId/exception] Notification sent to destination team leader ${targetTeam.team_leader_id} for worker transfer`)
+            }
+          }
+        } catch (notificationError: any) {
+          console.error('[POST /teams/members/:memberId/exception] Error in notification process:', notificationError)
+          // Don't fail the request if notifications fail - transfer is still completed
+        }
       }
     }
 
@@ -1264,35 +1532,17 @@ teams.patch('/exceptions/:exceptionId', authMiddleware, requireRole(['team_leade
 
     const adminClient = getAdminClient()
 
-    // Verify team leader owns this exception
-    const { data: exception, error: exceptionError } = await adminClient
-      .from('worker_exceptions')
-      .select('*, teams(team_leader_id), users!worker_exceptions_created_by_fkey(role)')
-      .eq('id', exceptionId)
-      .single()
-
-    if (!exception || exceptionError) {
-      return c.json({ error: 'Exception not found' }, 404)
+    // OPTIMIZATION: Use helper function to get exception and verify authorization
+    const exceptionAuth = await getExceptionAndVerifyAuth(adminClient, exceptionId, user.id)
+    if (exceptionAuth.error) {
+      return c.json({ error: exceptionAuth.error }, exceptionAuth.status as 403 | 404)
     }
+    const { exception } = exceptionAuth
 
-    const team = Array.isArray(exception.teams) ? exception.teams[0] : exception.teams
-    if (!team || team.team_leader_id !== user.id) {
-      return c.json({ error: 'Unauthorized' }, 403)
-    }
-
-    // Prevent update if exception is assigned to WHS
-    if (exception.assigned_to_whs) {
-      return c.json({ 
-        error: 'Cannot update exception: This exception has been assigned to WHS and must be closed by WHS first before it can be modified.' 
-      }, 403)
-    }
-
-    // Prevent update if exception was created by supervisor
-    const creator = Array.isArray(exception.users) ? exception.users[0] : exception.users
-    if (creator && creator.role === 'supervisor') {
-      return c.json({ 
-        error: 'Cannot update exception: This exception was created by a Site Supervisor and cannot be modified until the supervisor closes the incident.' 
-      }, 403)
+    // OPTIMIZATION: Use helper function to validate exception modification
+    const validation = validateExceptionModification(exception)
+    if (validation) {
+      return c.json({ error: validation.error }, validation.status as 403)
     }
 
     // Build update object
@@ -1312,40 +1562,12 @@ teams.patch('/exceptions/:exceptionId', authMiddleware, requireRole(['team_leade
       }
     }
 
-    // OPTIMIZATION: Automatically deactivate all active schedules when exception is activated
-    // This uses the new worker schedule logic - schedules are soft-deleted (is_active = false)
-    // but data remains in database for analytics purposes
+    // OPTIMIZATION: Use helper function to deactivate schedules when exception is activated
     let deactivatedScheduleCount = 0
     if (is_active === true) {
-      try {
-        // OPTIMIZATION: Use count query instead of fetching all IDs to reduce data transfer
-        const { count: scheduleCount, error: countError } = await adminClient
-          .from('worker_schedules')
-          .select('*', { count: 'exact', head: true })
-          .eq('worker_id', exception.user_id)
-          .eq('is_active', true)
-        
-        if (!countError && scheduleCount && scheduleCount > 0) {
-          // Only update if there are active schedules
-          const { error: deactivateError } = await adminClient
-            .from('worker_schedules')
-            .update({ is_active: false })
-            .eq('worker_id', exception.user_id)
-            .eq('is_active', true)
-
-          if (deactivateError) {
-            console.error('[PATCH /teams/exceptions/:exceptionId] Error deactivating schedules:', deactivateError)
-            // Don't fail the exception update if schedule deactivation fails
-          } else {
-            deactivatedScheduleCount = scheduleCount
-            if (deactivatedScheduleCount > 0) {
-              console.log(`[PATCH /teams/exceptions/:exceptionId] Automatically deactivated ${deactivatedScheduleCount} active schedule(s) for worker ${exception.user_id} (Exception activated)`)
-            }
-          }
-        }
-      } catch (deactivateScheduleError: any) {
-        console.error('[PATCH /teams/exceptions/:exceptionId] Error in schedule deactivation process:', deactivateScheduleError)
-        // Don't fail the exception update if schedule deactivation fails
+      deactivatedScheduleCount = await deactivateWorkerSchedules(adminClient, exception.user_id)
+      if (deactivatedScheduleCount > 0) {
+        console.log(`[PATCH /teams/exceptions/:exceptionId] Automatically deactivated ${deactivatedScheduleCount} active schedule(s) for worker ${exception.user_id} (Exception activated)`)
       }
     }
 
@@ -1361,27 +1583,8 @@ teams.patch('/exceptions/:exceptionId', authMiddleware, requireRole(['team_leade
       return c.json({ error: 'Failed to update exception', details: error.message }, 500)
     }
 
-    // Invalidate cache for analytics (since exception update affects analytics)
-    try {
-      const { cache } = await import('../utils/cache.js')
-      
-      // Invalidate analytics cache for this team leader
-      cache.deleteByUserId(user.id, ['analytics'])
-      
-      // Also invalidate supervisor analytics if supervisor exists
-      const { data: supervisorData } = await adminClient
-        .from('teams')
-        .select('supervisor_id')
-        .eq('id', exception.team_id)
-        .single()
-      
-      if (supervisorData?.supervisor_id) {
-        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
-      }
-    } catch (cacheError: any) {
-      console.error('[PATCH /teams/exceptions/:exceptionId] Error invalidating cache:', cacheError)
-      // Don't fail the request if cache invalidation fails
-    }
+    // OPTIMIZATION: Use helper function to invalidate cache
+    await invalidateAnalyticsCache(adminClient, exception.team_id, user.id)
 
     return c.json({
       message: 'Exception updated successfully',
@@ -1408,69 +1611,23 @@ teams.delete('/exceptions/:exceptionId', authMiddleware, requireRole(['team_lead
     const exceptionId = c.req.param('exceptionId')
     const adminClient = getAdminClient()
 
-    // Verify team leader owns this exception
-    const { data: exception, error: exceptionError } = await adminClient
-      .from('worker_exceptions')
-      .select('*, teams(team_leader_id), users!worker_exceptions_created_by_fkey(role)')
-      .eq('id', exceptionId)
-      .single()
+    // OPTIMIZATION: Use helper function to get exception and verify authorization
+    const exceptionAuth = await getExceptionAndVerifyAuth(adminClient, exceptionId, user.id)
+    if (exceptionAuth.error) {
+      return c.json({ error: exceptionAuth.error }, exceptionAuth.status as 403 | 404)
+    }
+    const { exception } = exceptionAuth
 
-    if (!exception || exceptionError) {
-      return c.json({ error: 'Exception not found' }, 404)
+    // OPTIMIZATION: Use helper function to validate exception modification
+    const validation = validateExceptionModification(exception)
+    if (validation) {
+      return c.json({ error: validation.error }, validation.status as 403)
     }
 
-    const team = Array.isArray(exception.teams) ? exception.teams[0] : exception.teams
-    if (!team || team.team_leader_id !== user.id) {
-      return c.json({ error: 'Unauthorized' }, 403)
-    }
-
-    // Prevent deletion if exception is assigned to WHS
-    if (exception.assigned_to_whs) {
-      return c.json({ 
-        error: 'Cannot remove exception: This exception has been assigned to WHS and must be closed by WHS first before it can be removed.' 
-      }, 403)
-    }
-
-    // Prevent deletion if exception was created by supervisor
-    const creator = Array.isArray(exception.users) ? exception.users[0] : exception.users
-    if (creator && creator.role === 'supervisor') {
-      return c.json({ 
-        error: 'Cannot remove exception: This exception was created by a Site Supervisor and cannot be removed until the supervisor closes the incident.' 
-      }, 403)
-    }
-
-    // OPTIMIZATION: Automatically reactivate all inactive schedules for this worker when exception is removed
-    // This uses the new worker schedule logic - schedules that were deactivated due to exception will be reactivated
-    let reactivatedScheduleCount = 0
-    try {
-      // OPTIMIZATION: Use count query instead of fetching all IDs to reduce data transfer
-      const { count: scheduleCount, error: countError } = await adminClient
-        .from('worker_schedules')
-        .select('*', { count: 'exact', head: true })
-        .eq('worker_id', exception.user_id)
-        .eq('is_active', false)
-      
-      if (!countError && scheduleCount && scheduleCount > 0) {
-        // Only update if there are inactive schedules
-        const { error: reactivateError } = await adminClient
-          .from('worker_schedules')
-          .update({ is_active: true })
-          .eq('worker_id', exception.user_id)
-          .eq('is_active', false)
-
-        if (reactivateError) {
-          console.error('[DELETE /teams/exceptions/:exceptionId] Error reactivating schedules:', reactivateError)
-          // Don't fail the exception deletion if schedule reactivation fails
-        } else {
-          reactivatedScheduleCount = scheduleCount
-          if (reactivatedScheduleCount > 0) {
-            console.log(`[DELETE /teams/exceptions/:exceptionId] Automatically reactivated ${reactivatedScheduleCount} schedule(s) for worker ${exception.user_id} (Exception removed)`)
-          }
-        }
-      }
-    } catch (reactivateScheduleError: any) {
-      console.error('[DELETE /teams/exceptions/:exceptionId] Error in schedule reactivation process:', reactivateScheduleError)
-      // Don't fail the exception deletion if schedule reactivation fails
+    // OPTIMIZATION: Use helper function to reactivate schedules
+    const reactivatedScheduleCount = await reactivateWorkerSchedules(adminClient, exception.user_id)
+    if (reactivatedScheduleCount > 0) {
+      console.log(`[DELETE /teams/exceptions/:exceptionId] Automatically reactivated ${reactivatedScheduleCount} schedule(s) for worker ${exception.user_id} (Exception removed)`)
     }
 
     // Deactivate exception (soft delete) and set deactivated_at timestamp
@@ -1487,27 +1644,8 @@ teams.delete('/exceptions/:exceptionId', authMiddleware, requireRole(['team_lead
       return c.json({ error: 'Failed to deactivate exception', details: error.message }, 500)
     }
 
-    // Invalidate cache for analytics (since exception deactivation affects analytics)
-    try {
-      const { cache } = await import('../utils/cache.js')
-      
-      // Invalidate analytics cache for this team leader
-      cache.deleteByUserId(user.id, ['analytics'])
-      
-      // Also invalidate supervisor analytics if supervisor exists
-      const { data: supervisorData } = await adminClient
-        .from('teams')
-        .select('supervisor_id')
-        .eq('id', exception.team_id)
-        .single()
-      
-      if (supervisorData?.supervisor_id) {
-        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
-      }
-    } catch (cacheError: any) {
-      console.error('[DELETE /teams/exceptions/:exceptionId] Error invalidating cache:', cacheError)
-      // Don't fail the request if cache invalidation fails
-    }
+    // OPTIMIZATION: Use helper function to invalidate cache
+    await invalidateAnalyticsCache(adminClient, exception.team_id, user.id)
 
     return c.json({ 
       message: 'Exception deactivated successfully',
@@ -1764,7 +1902,7 @@ teams.get('/check-ins', authMiddleware, requireRole(['team_leader']), async (c) 
         return c.json({ error: 'Invalid endDate format. Use YYYY-MM-DD' }, 400)
       }
       
-      startDateStr = startDateParam || new Date().toISOString().split('T')[0]
+      startDateStr = startDateParam || getTodayDateString()
       endDateStr = endDateParam || startDateStr
       
       // Ensure startDate <= endDate
@@ -1782,7 +1920,7 @@ teams.get('/check-ins', authMiddleware, requireRole(['team_leader']), async (c) 
     } 
     // Default to today
     else {
-      const todayStr = new Date().toISOString().split('T')[0]
+      const todayStr = getTodayDateString()
       startDateStr = todayStr
       endDateStr = todayStr
     }
@@ -2010,35 +2148,7 @@ teams.get('/check-ins', authMiddleware, requireRole(['team_leader']), async (c) 
     const allExceptions = (allExceptionsRaw || [])
       .filter((exc: any) => activeWorkerIds.includes(exc.user_id))
 
-    // Helper: Check if exception is active for a given date
-    // IMPORTANT: Must check is_active field AND deactivated_at AND date range
-    const isExceptionActive = (exception: { start_date: string; end_date?: string | null; deactivated_at?: string | null; is_active?: boolean }, checkDate: Date) => {
-      // First check: exception must be marked as active in database
-      if (exception.is_active === false) {
-        return false
-      }
-      
-      // Second check: If exception was deactivated before checkDate, it's not active
-      if (exception.deactivated_at) {
-        const deactivatedDate = new Date(exception.deactivated_at)
-        deactivatedDate.setHours(0, 0, 0, 0)
-        checkDate.setHours(0, 0, 0, 0)
-        if (deactivatedDate < checkDate || deactivatedDate.getTime() === checkDate.getTime()) {
-          return false
-        }
-      }
-      
-      // Third check: checkDate must be within exception's date range
-      const excStartDate = new Date(exception.start_date)
-      excStartDate.setHours(0, 0, 0, 0)
-      const excEndDate = exception.end_date ? new Date(exception.end_date) : null
-      if (excEndDate) {
-        excEndDate.setHours(23, 59, 59, 999)
-      }
-      checkDate.setHours(0, 0, 0, 0)
-      
-      return checkDate >= excStartDate && (!excEndDate || checkDate <= excEndDate)
-    }
+    // Use utility function isExceptionActive instead of duplicate local function
     
     // For date ranges, we need to determine which date to use for exception checking
     // Use endDate for exception checking (most recent date)
@@ -2201,7 +2311,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
     
     // Get date filters from query params
     const startDate = c.req.query('startDate') || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0]
-    const endDate = c.req.query('endDate') || new Date().toISOString().split('T')[0]
+    const endDate = c.req.query('endDate') || getTodayDateString()
     const workerIdsParam = c.req.query('workerIds')
     const workerIds = workerIdsParam ? workerIdsParam.split(',') : null
 
@@ -2371,6 +2481,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
           completionRate: 0,
           avgReadiness: { green: 0, amber: 0, red: 0 },
           onTimeRate: 0,
+          totalActiveWorkers: 0,
           trend: { completion: '0%', readiness: '0%' },
         },
         dailyTrends: [],
@@ -2405,39 +2516,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
       return exceptionStart <= rangeEnd && (!exceptionEnd || exceptionEnd >= rangeStart)
     })
 
-    // Helper function to check if exception is active on a specific date
-    // This uses deactivated_at timestamp and is_active field to ensure historical accuracy
-    const isExceptionActiveOnDate = (exception: { start_date: string; end_date?: string | null; deactivated_at?: string | null; is_active?: boolean }, checkDate: Date): boolean => {
-      // First check: exception must be marked as active in database
-      if (exception.is_active === false) {
-        return false
-      }
-      
-      // Create a copy of checkDate to avoid mutating the original
-      const checkDateCopy = new Date(checkDate)
-      checkDateCopy.setHours(0, 0, 0, 0)
-      
-      // Second check: If exception was deactivated, check if deactivation was before or on the checkDate
-      if (exception.deactivated_at) {
-        const deactivatedDate = new Date(exception.deactivated_at)
-        deactivatedDate.setHours(0, 0, 0, 0)
-        // If deactivated before or on checkDate, exception was not active on that date
-        if (deactivatedDate <= checkDateCopy) {
-          return false
-        }
-      }
-      
-      // Third check: checkDate must be within exception's date range - use date strings to avoid timezone issues
-      const checkDateStr = formatDateString(checkDateCopy)
-      const startDateStr = exception.start_date
-      const endDateStr = exception.end_date || null
-      
-      // Compare date strings directly (YYYY-MM-DD format)
-      const isAfterStart = checkDateStr >= startDateStr
-      const isBeforeEnd = !endDateStr || checkDateStr <= endDateStr
-      
-      return isAfterStart && isBeforeEnd
-    }
+    // Use utility function isExceptionActive instead of duplicate local function
 
     // Create a map of exceptions by user_id for quick lookup
     const exceptionsByWorker = new Map<string, any[]>()
@@ -2568,7 +2647,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
       const activeWorkersOnDate = Array.from(workersWithScheduleOnDate).filter(workerId => {
         const workerExceptions = exceptionsByWorker.get(workerId) || []
         // Worker is active if they have no exceptions OR no exception is active on this date
-        return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
+        return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
       })
       
       totalExpectedCheckIns += activeWorkersOnDate.length
@@ -2579,7 +2658,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
       const checkInDate = new Date(checkIn.check_in_date)
       const workerExceptions = exceptionsByWorker.get(checkIn.user_id) || []
       // Check-in is valid if worker had no exception active on that date
-      return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkInDate))
+      return !workerExceptions.some(exception => isExceptionActive(exception, checkInDate))
     })
 
     // Calculate summary statistics (only using valid check-ins)
@@ -2599,6 +2678,16 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
     }
 
     // Calculate daily trends
+    // Track which workers checked in on each date for accurate pending calculation
+    const checkInsByDate = new Map<string, Set<string>>()
+    ;(checkIns || []).forEach((checkIn: any) => {
+      const dateStr = checkIn.check_in_date
+      if (!checkInsByDate.has(dateStr)) {
+        checkInsByDate.set(dateStr, new Set())
+      }
+      checkInsByDate.get(dateStr)!.add(checkIn.user_id)
+    })
+
     const dailyTrendsMap = new Map<string, {
       date: string
       completed: number
@@ -2608,7 +2697,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
       red: number
     }>()
 
-    // Initialize all dates in range (count workers with schedules per day, excluding exceptions)
+    // Initialize all dates in range and calculate pending correctly
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
       // Use local date string to avoid timezone issues (YYYY-MM-DD format)
       const dateStr = formatDateString(d)
@@ -2618,29 +2707,37 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
       // Get workers with schedules on this date
       const workersWithScheduleOnDate = schedulesByDate.get(dateStr) || new Set()
       
-      // Count workers with schedule AND without exceptions on this date
+      // Get list of active workers (with schedules AND without exceptions on this date)
       const activeWorkersOnDate = Array.from(workersWithScheduleOnDate).filter(workerId => {
         const workerExceptions = exceptionsByWorker.get(workerId) || []
-        return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
-      }).length
+        return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
+      })
+      
+      // Get workers who checked in on this date (excluding those with exceptions)
+      const workersWhoCheckedIn = Array.from(checkInsByDate.get(dateStr) || []).filter(workerId => {
+        const workerExceptions = exceptionsByWorker.get(workerId) || []
+        return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
+      })
+      
+      // Pending = active workers - workers who checked in
+      const pendingCount = activeWorkersOnDate.length - workersWhoCheckedIn.length
       
       dailyTrendsMap.set(dateStr, {
         date: dateStr,
-        completed: 0,
-        pending: activeWorkersOnDate, // Only count workers with schedules and without exceptions
+        completed: workersWhoCheckedIn.length, // Only count check-ins from workers without exceptions
+        pending: Math.max(0, pendingCount), // Ensure pending is never negative
         green: 0,
         amber: 0,
         red: 0,
       })
     }
 
-    // Fill in check-in data (only valid check-ins)
-    validCheckIns.forEach((checkIn: any) => {
+    // Fill in readiness data from ALL check-ins (preserves historical data)
+    ;(checkIns || []).forEach((checkIn: any) => {
       const dateStr = checkIn.check_in_date
       const dayData = dailyTrendsMap.get(dateStr)
       if (dayData) {
-        dayData.completed++
-        dayData.pending--
+        // Always count readiness data (shows actual work done, even if worker has exception)
         if (checkIn.predicted_readiness === 'Green') dayData.green++
         else if (checkIn.predicted_readiness === 'Yellow' || checkIn.predicted_readiness === 'Amber') dayData.amber++
         else if (checkIn.predicted_readiness === 'Red') dayData.red++
@@ -2707,7 +2804,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
         if (!hasScheduleOnDate) continue // Skip days without assigned schedule
         
         // Check if worker has exception on this date
-        const hasExceptionOnDate = workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
+        const hasExceptionOnDate = workerExceptions.some(exception => isExceptionActive(exception, checkDate))
         if (!hasExceptionOnDate) {
           activeDaysForWorker++
         }
@@ -2774,7 +2871,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
     const validPrevCheckIns = (prevCheckIns || []).filter((checkIn: any) => {
       const checkInDate = new Date(checkIn.check_in_date)
       const workerExceptions = exceptionsByWorker.get(checkIn.user_id) || []
-      return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkInDate))
+      return !workerExceptions.some(exception => isExceptionActive(exception, checkInDate))
     })
 
     // Get schedules for previous period (both single-date and recurring)
@@ -2838,7 +2935,7 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
       // Count workers with schedule AND without exceptions
       const activeWorkersOnDate = Array.from(prevWorkersWithScheduleOnDate).filter(workerId => {
         const workerExceptions = exceptionsByWorker.get(workerId) || []
-        return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
+        return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
       }).length
       
       prevTotalExpected += activeWorkersOnDate
@@ -2853,12 +2950,53 @@ teams.get('/check-ins/analytics', authMiddleware, requireRole(['team_leader']), 
     const currentGreenPercent = totalReadiness > 0 ? (green / totalReadiness) * 100 : 0
     const readinessTrend = currentGreenPercent - prevGreenPercent
 
+    // Calculate total active workers (unique workers with schedules in date range, excluding exceptions)
+    const activeWorkersSet = new Set<string>()
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const dateStr = formatDateString(d)
+      const checkDate = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+      const workersWithScheduleOnDate = schedulesByDate.get(dateStr) || new Set()
+      
+      Array.from(workersWithScheduleOnDate).forEach(workerId => {
+        const workerExceptions = exceptionsByWorker.get(workerId) || []
+        const hasExceptionOnDate = workerExceptions.some(exception => isExceptionActive(exception, checkDate))
+        if (!hasExceptionOnDate) {
+          activeWorkersSet.add(workerId)
+        }
+      })
+    }
+    const totalActiveWorkers = activeWorkersSet.size
+
+    // Count current active exceptions (exceptions that are active today)
+    const currentDate = new Date()
+    currentDate.setHours(0, 0, 0, 0)
+    const currentDateStr = formatDateString(currentDate)
+    let currentActiveExceptions = 0
+    if (allExceptions) {
+      currentActiveExceptions = allExceptions.filter((exception: any) => {
+        if (!exception.is_active) return false
+        const startDate = new Date(exception.start_date)
+        startDate.setHours(0, 0, 0, 0)
+        const endDate = exception.end_date ? new Date(exception.end_date) : null
+        if (endDate) {
+          endDate.setHours(23, 59, 59, 999)
+        }
+        const startStr = formatDateString(startDate)
+        const endStr = endDate ? formatDateString(endDate) : null
+        
+        // Check if current date is within the exception date range
+        return currentDateStr >= startStr && (!endStr || currentDateStr <= endStr)
+      }).length
+    }
+
     const responseData = {
       summary: {
         totalCheckIns,
         completionRate,
         avgReadiness,
         onTimeRate: 85, // Placeholder - can be calculated based on check-in window
+        totalActiveWorkers,
+        currentActiveExceptions,
         trend: {
           completion: `${completionTrend >= 0 ? '+' : ''}${Math.round(completionTrend * 10) / 10}%`,
           readiness: `${readinessTrend >= 0 ? '+' : ''}${Math.round(readinessTrend * 10) / 10}%`,

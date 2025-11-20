@@ -2,6 +2,12 @@ import { Hono } from 'hono'
 import { supabase } from '../lib/supabase.js'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.js'
 import { getAdminClient } from '../utils/adminClient.js'
+import { 
+  isExceptionActive, 
+  findConflictingException, 
+  getExceptionTypeLabel,
+  type WorkerException 
+} from '../utils/exceptionUtils.js'
 
 const schedules = new Hono<{ Variables: AuthVariables }>()
 
@@ -378,6 +384,48 @@ schedules.post('/workers', authMiddleware, requireRole(['team_leader']), async (
       return c.json({ error: 'Invalid worker or user is not a worker' }, 400)
     }
 
+    // SECURITY: Check if worker has active exception - prevent schedule creation
+    const { data: workerExceptions, error: exceptionsError } = await adminClient
+      .from('worker_exceptions')
+      .select('id, exception_type, start_date, end_date, is_active, deactivated_at')
+      .eq('user_id', worker_id)
+      .eq('is_active', true)
+
+    if (exceptionsError) {
+      console.error('[POST /schedules/workers] Error checking exceptions:', exceptionsError)
+      // Don't fail if exception check fails, but log it
+    } else if (workerExceptions && workerExceptions.length > 0) {
+      let conflictingException: WorkerException | null = null
+      
+      if (isRecurringMode) {
+        // For recurring schedules, check if exception overlaps with the date range
+        conflictingException = findConflictingException(
+          workerExceptions,
+          new Date(start_date!),
+          new Date(end_date!)
+        )
+      } else {
+        // For single date schedules, check if the scheduled_date falls within an active exception
+        const scheduleDate = new Date(scheduled_date!)
+        for (const exception of workerExceptions) {
+          if (isExceptionActive(exception, scheduleDate)) {
+            conflictingException = exception
+            break
+          }
+        }
+      }
+      
+      if (conflictingException) {
+        const exceptionTypeLabel = getExceptionTypeLabel(conflictingException.exception_type || 'other')
+        
+        return c.json({ 
+          error: `Cannot create schedule: Worker has an active ${exceptionTypeLabel} exception. Please remove or close the exception first before creating schedules.`,
+          exception_type: conflictingException.exception_type,
+          exception_id: conflictingException.id
+        }, 409)
+      }
+    }
+
     // Check for existing schedules to prevent duplicates
     // Check both active and inactive schedules to prevent duplicates
     if (isRecurringMode) {
@@ -593,39 +641,68 @@ schedules.put('/workers/:id', authMiddleware, requireRole(['team_leader']), asyn
       return c.json({ error: 'Unauthorized - you can only edit schedules for workers in your team' }, 403)
     }
 
-    // VALIDATION: Prevent ANY schedule updates if worker has an active exception
-    const { data: activeException } = await adminClient
-      .from('worker_exceptions')
-      .select('id, exception_type, start_date, end_date')
-      .eq('user_id', schedule.worker_id)
-      .eq('is_active', true)
-      .maybeSingle()
+    // SECURITY: Check if worker has active exception when trying to activate schedule
+    // Also check if updating schedule date(s) would conflict with active exception
+    const isModifyingSchedule = is_active === true || scheduled_date !== undefined || 
+                                effective_date !== undefined || expiry_date !== undefined
+    
+    if (isModifyingSchedule) {
+      const { data: workerExceptions, error: exceptionsError } = await adminClient
+        .from('worker_exceptions')
+        .select('id, exception_type, start_date, end_date, is_active, deactivated_at')
+        .eq('user_id', schedule.worker_id)
+        .eq('is_active', true)
 
-    if (activeException) {
-      // Check if exception overlaps with schedule date or today
-      const today = new Date()
-      today.setHours(0, 0, 0, 0)
-      const checkDate = schedule.scheduled_date ? new Date(schedule.scheduled_date) : today
-      checkDate.setHours(0, 0, 0, 0)
-      
-      const exceptionStart = new Date(activeException.start_date)
-      exceptionStart.setHours(0, 0, 0, 0)
-      const exceptionEnd = activeException.end_date ? new Date(activeException.end_date) : null
-      if (exceptionEnd) exceptionEnd.setHours(23, 59, 59, 999)
-
-      if (checkDate >= exceptionStart && (!exceptionEnd || checkDate <= exceptionEnd)) {
-        const exceptionLabels: Record<string, string> = {
-          transfer: 'Transfer',
-          accident: 'Accident',
-          injury: 'Injury',
-          medical_leave: 'Medical Leave',
-          other: 'Other',
-        }
-        const exceptionLabel = exceptionLabels[activeException.exception_type] || activeException.exception_type
+      if (exceptionsError) {
+        console.error('[PUT /schedules/workers/:id] Error checking exceptions:', exceptionsError)
+      } else if (workerExceptions && workerExceptions.length > 0) {
+        let conflictingException: WorkerException | null = null
         
-        return c.json({ 
-          error: `Cannot update schedule: Worker has an active ${exceptionLabel} exemption. Please remove or close the exemption first.` 
-        }, 400)
+        // Determine which date(s) to check based on what's being updated
+        if (is_active === true) {
+          // Check if activating conflicts with current exception
+          if (schedule.scheduled_date) {
+            // Single date schedule - check that specific date
+            const checkDate = new Date(schedule.scheduled_date)
+            conflictingException = workerExceptions.find(exc => 
+              isExceptionActive(exc, checkDate)
+            ) || null
+          } else if (schedule.day_of_week !== null) {
+            // Recurring schedule - check next 7 days for conflicts
+            const today = new Date()
+            const nextWeek = new Date(today)
+            nextWeek.setDate(nextWeek.getDate() + 7)
+            conflictingException = findConflictingException(workerExceptions, today, nextWeek)
+          }
+        } else if (scheduled_date !== undefined && scheduled_date !== null) {
+          // Updating to new single date - check that date
+          const newDate = new Date(scheduled_date)
+          conflictingException = workerExceptions.find(exc => 
+            isExceptionActive(exc, newDate)
+          ) || null
+        } else if (effective_date !== undefined || expiry_date !== undefined) {
+          // Updating date range for recurring schedule
+          const startDate = effective_date ? new Date(effective_date) : new Date()
+          const endDate = expiry_date ? new Date(expiry_date) : new Date(startDate.getTime() + 90 * 24 * 60 * 60 * 1000) // 90 days ahead
+          conflictingException = findConflictingException(workerExceptions, startDate, endDate)
+        } else {
+          // General update - check today
+          conflictingException = workerExceptions.find(exc => 
+            isExceptionActive(exc, new Date())
+          ) || null
+        }
+        
+        if (conflictingException) {
+          const exceptionTypeLabel = getExceptionTypeLabel(conflictingException.exception_type || 'other')
+          const action = is_active === true ? 'activate' : 'update'
+          const actionIng = is_active === true ? 'activating' : 'updating'
+          
+          return c.json({ 
+            error: `Cannot ${action} schedule: Worker has an active ${exceptionTypeLabel} exception. Please remove or close the exception first before ${actionIng} schedules.`,
+            exception_type: conflictingException.exception_type,
+            exception_id: conflictingException.id
+          }, 409)
+        }
       }
     }
 

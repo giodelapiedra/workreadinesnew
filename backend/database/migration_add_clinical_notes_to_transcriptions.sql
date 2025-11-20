@@ -17,3 +17,13 @@ COMMENT ON COLUMN transcriptions.appointment_id IS 'Link to the appointment this
 CREATE INDEX IF NOT EXISTS idx_transcriptions_appointment_id ON transcriptions(appointment_id)
 WHERE appointment_id IS NOT NULL;
 
+
+
+
+
+
+
+
+
+
+

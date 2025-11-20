@@ -12,6 +12,7 @@ import whs from './routes/whs.js'
 import clinician from './routes/clinician.js'
 import worker from './routes/worker.js'
 import admin from './routes/admin.js'
+import executive from './routes/executive.js'
 
 const app = new Hono()
 
@@ -89,6 +90,9 @@ app.route('/api/worker', worker)
 
 // Admin routes
 app.route('/api/admin', admin)
+
+// Executive routes
+app.route('/api/executive', executive)
 
 // Example API route
 app.get('/api', (c) => {

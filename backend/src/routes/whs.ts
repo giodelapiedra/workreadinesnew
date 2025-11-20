@@ -1,8 +1,10 @@
 import { Hono } from 'hono'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.js'
 import { getCaseStatusFromNotes, mapCaseStatusToDisplay, CaseStatus } from '../utils/caseStatus.js'
+import { parseIncidentNotes } from '../utils/notesParser.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { normalizeDate, isDateInRange } from '../utils/dateTime.js'
+import { formatUserFullName } from '../utils/userUtils.js'
 
 // OPTIMIZATION: Constants for active case statuses (avoid recreating array)
 const ACTIVE_CASE_STATUSES = ['new', 'triaged', 'assessed', 'in_rehab'] as const
@@ -209,28 +211,11 @@ whs.get('/cases', authMiddleware, requireRole(['whs_control_center']), async (c)
       const teamLeader = team?.team_leader_id ? userMap.get(team.team_leader_id) : null
       const clinician = Array.isArray(incident.clinician) ? incident.clinician[0] : incident.clinician
 
-      // OPTIMIZATION: Parse notes first to get case status (needed for isCurrentlyActive calculation)
-      let notesData: any = null
-      let caseStatusFromNotes: CaseStatus | null = null
-      let approvedBy: string | null = null
-      let approvedAt: string | null = null
-
-      if (incident.notes) {
-        try {
-          notesData = JSON.parse(incident.notes)
-          // Extract case_status using secure helper (validates status)
-          caseStatusFromNotes = getCaseStatusFromNotes(incident.notes)
-          // Extract approval information
-          if (notesData.approved_by) {
-            approvedBy = notesData.approved_by
-          }
-          if (notesData.approved_at) {
-            approvedAt = notesData.approved_at
-          }
-        } catch {
-          // Notes is not JSON, ignore - caseStatusFromNotes will remain null
-        }
-      }
+      // OPTIMIZATION: Use centralized notes parser
+      const parsedNotes = parseIncidentNotes(incident.notes)
+      const caseStatusFromNotes = getCaseStatusFromNotes(incident.notes)
+      const approvedBy = parsedNotes?.approved_by || null
+      const approvedAt = parsedNotes?.approved_at || null
 
       const startDate = new Date(incident.start_date)
       const endDate = incident.end_date ? new Date(incident.end_date) : null
@@ -481,6 +466,166 @@ whs.get('/cases', authMiddleware, requireRole(['whs_control_center']), async (c)
     })
   } catch (error: any) {
     console.error('[GET /whs/cases] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get single case detail by ID for WHS
+whs.get('/cases/:id', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const caseId = c.req.param('id')
+    if (!caseId) {
+      return c.json({ error: 'Case ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // OPTIMIZATION: Get single case with related data in one query
+    // WHS can view all cases assigned to WHS (no clinician_id restriction)
+    const { data: caseData, error: caseError } = await adminClient
+      .from('worker_exceptions')
+      .select(`
+        *,
+        users!worker_exceptions_user_id_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        ),
+        teams!worker_exceptions_team_id_fkey(
+          id,
+          name,
+          site_location,
+          supervisor_id,
+          team_leader_id
+        ),
+        clinician:users!worker_exceptions_clinician_id_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        )
+      `)
+      .eq('id', caseId)
+      .eq('assigned_to_whs', true) // SECURITY: Only cases assigned to WHS
+      .in('exception_type', ['injury', 'medical_leave', 'accident', 'other'])
+      .single()
+
+    if (caseError || !caseData) {
+      console.error('[GET /whs/cases/:id] Error:', caseError)
+      return c.json({ error: 'Case not found or not authorized' }, 404)
+    }
+
+    // OPTIMIZATION: Parallel fetch of related data
+    const team = Array.isArray(caseData.teams) ? caseData.teams[0] : caseData.teams
+    const userIds = [team?.supervisor_id, team?.team_leader_id].filter(Boolean)
+    
+    const [teamMemberResult, usersResult] = await Promise.all([
+      // Get phone number
+      adminClient
+        .from('team_members')
+        .select('phone')
+        .eq('user_id', caseData.user_id)
+        .eq('team_id', caseData.team_id)
+        .maybeSingle(),
+      
+      // Get supervisor and team leader info
+      userIds.length > 0
+        ? adminClient
+            .from('users')
+            .select('id, email, first_name, last_name, full_name')
+            .in('id', userIds)
+        : Promise.resolve({ data: [] }),
+    ])
+
+    // Build user map for O(1) lookups
+    const userMap = new Map()
+    if (usersResult.data) {
+      usersResult.data.forEach((u: any) => userMap.set(u.id, u))
+    }
+
+    const user_data = Array.isArray(caseData.users) ? caseData.users[0] : caseData.users
+    const supervisor = userMap.get(team?.supervisor_id)
+    const teamLeader = userMap.get(team?.team_leader_id)
+    const clinician = Array.isArray(caseData.clinician) ? caseData.clinician[0] : caseData.clinician
+    
+    // Generate case number (consistent with other routes)
+    const generateCaseNumber = (exceptionId: string, createdAt: string): string => {
+      const date = new Date(createdAt)
+      const year = date.getFullYear()
+      const month = String(date.getMonth() + 1).padStart(2, '0')
+      const day = String(date.getDate()).padStart(2, '0')
+      const hours = String(date.getHours()).padStart(2, '0')
+      const minutes = String(date.getMinutes()).padStart(2, '0')
+      const seconds = String(date.getSeconds()).padStart(2, '0')
+      const uuidPrefix = exceptionId?.substring(0, 4)?.toUpperCase() || 'CASE'
+      return `CASE-${year}${month}${day}-${hours}${minutes}${seconds}-${uuidPrefix}`
+    }
+    
+    // Determine case status
+    const caseStatusFromNotes = getCaseStatusFromNotes(caseData.notes)
+    const todayDate = new Date()
+    todayDate.setHours(0, 0, 0, 0)
+    const startDate = new Date(caseData.start_date)
+    startDate.setHours(0, 0, 0, 0)
+    const endDate = caseData.end_date ? new Date(caseData.end_date) : null
+    if (endDate) endDate.setHours(0, 0, 0, 0)
+    const isCurrentlyActive = todayDate >= startDate && (!endDate || todayDate <= endDate) && caseData.is_active
+
+    // Determine priority
+    let priority = 'MEDIUM'
+    if (caseData.exception_type === 'injury' || caseData.exception_type === 'accident') {
+      priority = 'HIGH'
+    } else if (caseData.exception_type === 'medical_leave') {
+      priority = 'MEDIUM'
+    } else {
+      priority = 'LOW'
+    }
+
+    const formattedCase = {
+      id: caseData.id,
+      caseNumber: generateCaseNumber(caseData.id, caseData.created_at),
+      workerId: caseData.user_id,
+      workerName: formatUserFullName(user_data || {}),
+      workerEmail: user_data?.email || '',
+      workerInitials: (user_data?.first_name?.[0]?.toUpperCase() || '') + (user_data?.last_name?.[0]?.toUpperCase() || '') || 'U',
+      teamId: caseData.team_id,
+      teamName: team?.name || '',
+      siteLocation: team?.site_location || '',
+      supervisorName: formatUserFullName(supervisor || {}),
+      teamLeaderName: formatUserFullName(teamLeader || {}),
+      clinicianId: caseData.clinician_id || null,
+      clinicianName: formatUserFullName(clinician || {}),
+      type: caseData.exception_type,
+      reason: caseData.reason || '',
+      startDate: caseData.start_date,
+      endDate: caseData.end_date,
+      status: mapCaseStatusToDisplay(caseStatusFromNotes, false, isCurrentlyActive),
+      priority,
+      isActive: isCurrentlyActive,
+      caseStatus: caseStatusFromNotes || null,
+      notes: caseData.notes || null,
+      createdAt: caseData.created_at,
+      updatedAt: caseData.updated_at,
+      return_to_work_duty_type: caseData.return_to_work_duty_type || null,
+      return_to_work_date: caseData.return_to_work_date || null,
+      phone: teamMemberResult.data?.phone || null,
+    }
+
+    return c.json({ case: formattedCase }, 200, {
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    })
+  } catch (error: any) {
+    console.error('[GET /whs/cases/:id] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
@@ -1387,17 +1532,13 @@ whs.get('/clinicians/performance', authMiddleware, requireRole(['whs_control_cen
       })
     }
 
-    // OPTIMIZATION: Helper function to parse notes once (cached)
+    // OPTIMIZATION: Use centralized notes parser
     const parseNotes = (notes: string | null): { status: string; approved_at: string | null } => {
       if (!notes) return { status: 'open', approved_at: null }
-      try {
-        const notesData = JSON.parse(notes)
-        return {
-          status: notesData.case_status || 'open',
-          approved_at: notesData.approved_at || null
-        }
-      } catch {
-        return { status: 'open', approved_at: null }
+      const parsedNotes = parseIncidentNotes(notes)
+      return {
+        status: parsedNotes?.case_status || 'open',
+        approved_at: parsedNotes?.approved_at || null
       }
     }
 

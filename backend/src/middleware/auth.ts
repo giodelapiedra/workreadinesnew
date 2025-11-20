@@ -2,7 +2,7 @@ import { Context, Next } from 'hono'
 import { getCookie, setCookie } from 'hono/cookie'
 import { supabase } from '../lib/supabase.js'
 import { getAdminClient } from '../utils/adminClient.js'
-import { getCookieSameSite, shouldUsePartitioned } from '../utils/cookieHelpers.js'
+import { getCookieSameSite } from '../utils/cookieHelpers.js'
 
 export interface User {
   id: string
@@ -81,32 +81,10 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
       const userAgent = c.req.header('user-agent')
       const sameSite = getCookieSameSite(userAgent)
       const secure = isProduction
-      const usePartitioned = shouldUsePartitioned()
       
-      // Helper to clear cookie with optional Partitioned attribute
-      const clearCookieWithPartitioned = (name: string) => {
-        if (usePartitioned && sameSite === 'None') {
-          // Manually construct Set-Cookie header to clear with Partitioned attribute
-          const cookieParts = [
-            `${name}=`,
-            `Path=/`,
-            `Max-Age=0`,
-            `HttpOnly`,
-            `Secure`,
-            `SameSite=None`,
-            `Partitioned`
-          ]
-          
-          // Append Set-Cookie header (HTTP allows multiple Set-Cookie headers)
-          c.res.headers.append('Set-Cookie', cookieParts.join('; '))
-        } else {
-          setCookie(c, name, '', { httpOnly: true, secure, sameSite, maxAge: 0, path: '/' })
-        }
-      }
-      
-      clearCookieWithPartitioned(COOKIE_NAMES.ACCESS_TOKEN)
-      clearCookieWithPartitioned(COOKIE_NAMES.REFRESH_TOKEN)
-      clearCookieWithPartitioned(COOKIE_NAMES.USER_ID)
+      setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, '', { httpOnly: true, secure, sameSite, maxAge: 0, path: '/' })
+      setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', { httpOnly: true, secure, sameSite, maxAge: 0, path: '/' })
+      setCookie(c, COOKIE_NAMES.USER_ID, '', { httpOnly: true, secure, sameSite, maxAge: 0, path: '/' })
       
       return c.json({ error: 'Unauthorized: Invalid token' }, 401)
     }

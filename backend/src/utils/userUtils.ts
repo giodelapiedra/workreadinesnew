@@ -67,3 +67,81 @@ export async function ensureUserRecordExists(userId: string, email: string): Pro
   return null
 }
 
+/**
+ * Format user's full name from first_name and last_name
+ * @param user - User object with first_name, last_name, full_name, or email
+ * @returns Formatted full name
+ */
+export function formatUserFullName(user: {
+  first_name?: string | null
+  last_name?: string | null
+  full_name?: string | null
+  email?: string | null
+}): string {
+  if (user.full_name) {
+    return user.full_name
+  }
+  
+  if (user.first_name && user.last_name) {
+    return `${user.first_name} ${user.last_name}`
+  }
+  
+  if (user.first_name) {
+    return user.first_name
+  }
+  
+  if (user.email) {
+    return user.email.split('@')[0]
+  }
+  
+  return 'Unknown User'
+}
+
+/**
+ * Generate user initials from name
+ * @param name - Full name or email
+ * @returns Initials (max 2 characters)
+ */
+export function getUserInitials(name: string): string {
+  if (!name) {
+    return '??'
+  }
+  
+  const parts = name.trim().split(' ')
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase().slice(0, 2)
+  }
+  
+  return name.substring(0, 2).toUpperCase()
+}
+
+/**
+ * Format team leader data with consistent structure
+ * @param teamLeader - Team leader user data
+ * @returns Formatted team leader object
+ */
+export function formatTeamLeader(teamLeader: {
+  id: string
+  email: string
+  first_name?: string | null
+  last_name?: string | null
+  full_name?: string | null
+}): {
+  id: string
+  email: string
+  firstName: string
+  lastName: string
+  fullName: string
+  initials: string
+} {
+  const fullName = formatUserFullName(teamLeader)
+  
+  return {
+    id: teamLeader.id,
+    email: teamLeader.email,
+    firstName: teamLeader.first_name || '',
+    lastName: teamLeader.last_name || '',
+    fullName,
+    initials: getUserInitials(fullName),
+  }
+}

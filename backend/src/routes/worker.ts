@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { authMiddleware, requireRole } from '../middleware/auth.js'
+import { getCaseStatusFromNotes } from '../utils/caseStatus.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { analyzeIncident } from '../utils/openai.js'
 
@@ -31,18 +32,9 @@ worker.get('/can-report-incident', authMiddleware, requireRole(['worker']), asyn
       if (existingException.deactivated_at) {
         isClosed = true
       } else if (existingException.notes) {
-        // Check case_status in notes (if case was closed by clinician)
-        try {
-          const notesData = typeof existingException.notes === 'string' 
-            ? JSON.parse(existingException.notes) 
-            : existingException.notes
-          const caseStatus = notesData?.case_status?.toLowerCase()
-          isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
-        } catch {
-          // If notes is not JSON, try regex match (backward compatibility)
-          const caseStatus = existingException.notes.match(/case_status["\s]*[:=]["\s]*([^,}\s"]+)/i)?.[1]?.toLowerCase()
-          isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
-        }
+        // OPTIMIZATION: Use centralized case status helper
+        const caseStatus = getCaseStatusFromNotes(existingException.notes)
+        isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
       }
 
       if (!isClosed) {
@@ -214,18 +206,9 @@ worker.post('/report-incident', authMiddleware, requireRole(['worker']), async (
       if (existingException.deactivated_at) {
         isClosed = true
       } else if (existingException.notes) {
-        // Check case_status in notes (if case was closed by clinician)
-        try {
-          const notesData = typeof existingException.notes === 'string' 
-            ? JSON.parse(existingException.notes) 
-            : existingException.notes
-          const caseStatus = notesData?.case_status?.toLowerCase()
-          isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
-        } catch {
-          // If notes is not JSON, try regex match (backward compatibility)
-          const caseStatus = existingException.notes.match(/case_status["\s]*[:=]["\s]*([^,}\s"]+)/i)?.[1]?.toLowerCase()
-          isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
-        }
+        // OPTIMIZATION: Use centralized case status helper
+        const caseStatus = getCaseStatusFromNotes(existingException.notes)
+        isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
       }
       
       if (!isClosed) {
@@ -460,6 +443,387 @@ worker.post('/report-incident', authMiddleware, requireRole(['worker']), async (
   } catch (error: any) {
     console.error('[POST /worker/report-incident] Error:', error)
     return c.json({ error: 'Failed to submit incident report', details: error.message }, 500)
+  }
+})
+
+// Get worker's cases (accidents/incidents) - VIEW ONLY
+worker.get('/cases', authMiddleware, requireRole(['worker']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const page = c.req.query('page') ? parseInt(c.req.query('page')!) : 1
+    const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100)
+    const status = c.req.query('status') || 'all'
+    const search = c.req.query('search') || ''
+
+    const adminClient = getAdminClient()
+    const offset = (page - 1) * limit
+
+    // Get cases for this worker only
+    let query = adminClient
+      .from('worker_exceptions')
+      .select(`
+        *,
+        teams!worker_exceptions_team_id_fkey(
+          id,
+          name,
+          site_location,
+          supervisor_id,
+          team_leader_id
+        )
+      `)
+      .eq('user_id', user.id) // SECURITY: Only this worker's cases
+      .in('exception_type', ['injury', 'medical_leave', 'accident', 'other'])
+
+    // Filter by status
+    const { getTodayDateString } = await import('../utils/dateUtils.js')
+    const todayStr = getTodayDateString()
+    if (status === 'active') {
+      query = query.eq('is_active', true).gte('start_date', todayStr).or(`end_date.is.null,end_date.gte.${todayStr}`)
+    } else if (status === 'closed') {
+      query = query.or(`end_date.lt.${todayStr},is_active.eq.false`)
+    }
+
+    // Count query with same filters
+    const countQuery = adminClient
+      .from('worker_exceptions')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', user.id)
+      .in('exception_type', ['injury', 'medical_leave', 'accident', 'other'])
+    
+    if (status === 'active') {
+      countQuery.eq('is_active', true).gte('start_date', todayStr).or(`end_date.is.null,end_date.gte.${todayStr}`)
+    } else if (status === 'closed') {
+      countQuery.or(`end_date.lt.${todayStr},is_active.eq.false`)
+    }
+
+    const [countResult, casesResult] = await Promise.all([
+      countQuery,
+      query
+        .order('created_at', { ascending: false })
+        .range(offset, offset + limit - 1)
+    ])
+
+    const { count } = countResult
+    const { data: cases, error: casesError } = casesResult
+
+    if (casesError) {
+      console.error('[GET /worker/cases] Database Error:', casesError)
+      return c.json({ error: 'Failed to fetch cases', details: casesError.message }, 500)
+    }
+
+    // Get rehabilitation plans for cases
+    const caseIds = (cases || []).map((c: any) => c.id)
+    let rehabPlans: any[] = []
+    if (caseIds.length > 0) {
+      const { data: rehabPlansData } = await adminClient
+        .from('rehabilitation_plans')
+        .select('exception_id, status')
+        .in('exception_id', caseIds)
+        .eq('status', 'active')
+      
+      rehabPlans = rehabPlansData || []
+    }
+
+    const rehabMap = new Map()
+    rehabPlans.forEach((plan: any) => {
+      rehabMap.set(plan.exception_id, true)
+    })
+
+    // Get supervisor and team leader info
+    const supervisorIds = Array.from(new Set(
+      (cases || [])
+        .map((incident: any) => {
+          const team = Array.isArray(incident.teams) ? incident.teams[0] : incident.teams
+          return team?.supervisor_id
+        })
+        .filter(Boolean)
+    ))
+
+    const teamLeaderIds = Array.from(new Set(
+      (cases || [])
+        .map((incident: any) => {
+          const team = Array.isArray(incident.teams) ? incident.teams[0] : incident.teams
+          return team?.team_leader_id
+        })
+        .filter(Boolean)
+    ))
+
+    const allUserIds = Array.from(new Set([...supervisorIds, ...teamLeaderIds]))
+    let userMap = new Map()
+    if (allUserIds.length > 0) {
+      const { data: users } = await adminClient
+        .from('users')
+        .select('id, email, first_name, last_name, full_name')
+        .in('id', allUserIds)
+
+      if (users) {
+        users.forEach((userData: any) => {
+          userMap.set(userData.id, userData)
+        })
+      }
+    }
+
+    // Format cases
+    const { getCaseStatusFromNotes, mapCaseStatusToDisplay } = await import('../utils/caseStatus.js')
+    
+    // Generate case number from exception
+    const generateCaseNumber = (exceptionId: string, createdAt: string): string => {
+      const date = new Date(createdAt)
+      const year = date.getFullYear()
+      const month = String(date.getMonth() + 1).padStart(2, '0')
+      const day = String(date.getDate()).padStart(2, '0')
+      const hours = String(date.getHours()).padStart(2, '0')
+      const minutes = String(date.getMinutes()).padStart(2, '0')
+      const seconds = String(date.getSeconds()).padStart(2, '0')
+      const uuidPrefix = exceptionId?.substring(0, 4)?.toUpperCase() || 'CASE'
+      return `CASE-${year}${month}${day}-${hours}${minutes}${seconds}-${uuidPrefix}`
+    }
+    
+    const formatUserName = (user: any): string => {
+      if (!user) return 'Unknown'
+      if (user.full_name) return user.full_name
+      if (user.first_name && user.last_name) return `${user.first_name} ${user.last_name}`
+      return user.email || 'Unknown'
+    }
+
+    // Get worker's user data from database
+    const { data: workerUser } = await adminClient
+      .from('users')
+      .select('id, email, first_name, last_name, full_name')
+      .eq('id', user.id)
+      .single()
+
+    const todayDate = new Date()
+    todayDate.setHours(0, 0, 0, 0)
+    const casesArray = Array.isArray(cases) ? cases : []
+    let formattedCases = casesArray.map((incident: any) => {
+      const team = incident.teams?.[0] || incident.teams
+      const supervisor = team?.supervisor_id ? userMap.get(team.supervisor_id) : null
+      const teamLeader = team?.team_leader_id ? userMap.get(team.team_leader_id) : null
+      
+      const startDate = new Date(incident.start_date)
+      startDate.setHours(0, 0, 0, 0)
+      const endDate = incident.end_date ? new Date(incident.end_date) : null
+      if (endDate) endDate.setHours(0, 0, 0, 0)
+      
+      const isCurrentlyActive = todayDate >= startDate && (!endDate || todayDate <= endDate) && incident.is_active
+      const isInRehab = rehabMap.has(incident.id)
+
+      const caseNumber = generateCaseNumber(incident.id, incident.created_at)
+      const caseStatusFromNotes = getCaseStatusFromNotes(incident.notes)
+      const caseStatus = mapCaseStatusToDisplay(caseStatusFromNotes, isInRehab, isCurrentlyActive)
+
+      let priority = 'MEDIUM'
+      if (incident.exception_type === 'injury' || incident.exception_type === 'accident') {
+        priority = 'HIGH'
+      } else if (incident.exception_type === 'medical_leave') {
+        priority = 'MEDIUM'
+      } else {
+        priority = 'LOW'
+      }
+
+      return {
+        id: incident.id,
+        caseNumber,
+        workerId: incident.user_id,
+        workerName: formatUserName(workerUser),
+        workerEmail: workerUser?.email || user.email || '',
+        workerInitials: (workerUser?.first_name?.[0]?.toUpperCase() || '') + (workerUser?.last_name?.[0]?.toUpperCase() || '') || 'U',
+        teamId: incident.team_id,
+        teamName: team?.name || '',
+        siteLocation: team?.site_location || '',
+        supervisorName: formatUserName(supervisor),
+        teamLeaderName: formatUserName(teamLeader),
+        type: incident.exception_type,
+        reason: incident.reason || '',
+        startDate: incident.start_date,
+        endDate: incident.end_date,
+        status: caseStatus,
+        priority,
+        isActive: isCurrentlyActive,
+        isInRehab,
+        caseStatus: caseStatusFromNotes || null,
+        notes: incident.notes || null,
+        createdAt: incident.created_at,
+        updatedAt: incident.updated_at,
+        return_to_work_duty_type: incident.return_to_work_duty_type || null,
+        return_to_work_date: incident.return_to_work_date || null,
+      }
+    })
+
+    // Apply search filter
+    if (search.trim()) {
+      const searchLower = search.toLowerCase()
+      formattedCases = formattedCases.filter(caseItem => 
+        caseItem.caseNumber.toLowerCase().includes(searchLower) ||
+        caseItem.type.toLowerCase().includes(searchLower) ||
+        caseItem.teamName.toLowerCase().includes(searchLower)
+      )
+    }
+
+    return c.json({
+      cases: formattedCases,
+      pagination: {
+        page,
+        limit,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / limit),
+        hasNext: page < Math.ceil((count || 0) / limit),
+        hasPrev: page > 1,
+      },
+    }, 200)
+  } catch (error: any) {
+    console.error('[GET /worker/cases] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get single case detail for worker - VIEW ONLY
+worker.get('/cases/:id', authMiddleware, requireRole(['worker']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const caseId = c.req.param('id')
+    if (!caseId) {
+      return c.json({ error: 'Case ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get single case - SECURITY: Only this worker's cases
+    const { data: caseData, error: caseError } = await adminClient
+      .from('worker_exceptions')
+      .select(`
+        *,
+        teams!worker_exceptions_team_id_fkey(
+          id,
+          name,
+          site_location,
+          supervisor_id,
+          team_leader_id
+        )
+      `)
+      .eq('id', caseId)
+      .eq('user_id', user.id) // SECURITY: Only their own cases
+      .in('exception_type', ['injury', 'medical_leave', 'accident', 'other'])
+      .single()
+
+    if (caseError || !caseData) {
+      return c.json({ error: 'Case not found or not authorized' }, 404)
+    }
+
+    // Get supervisor and team leader info
+    const team = Array.isArray(caseData.teams) ? caseData.teams[0] : caseData.teams
+    const userIds = [team?.supervisor_id, team?.team_leader_id].filter(Boolean)
+    
+    let userMap = new Map()
+    if (userIds.length > 0) {
+      const { data: users } = await adminClient
+        .from('users')
+        .select('id, email, first_name, last_name, full_name')
+        .in('id', userIds)
+      
+      users?.forEach((u: any) => userMap.set(u.id, u))
+    }
+
+    // Check rehab status
+    const { data: rehabPlan } = await adminClient
+      .from('rehabilitation_plans')
+      .select('id, status')
+      .eq('exception_id', caseId)
+      .eq('status', 'active')
+      .maybeSingle()
+
+    const supervisor = userMap.get(team?.supervisor_id)
+    const teamLeader = userMap.get(team?.team_leader_id)
+    
+    const { getCaseStatusFromNotes, mapCaseStatusToDisplay } = await import('../utils/caseStatus.js')
+    
+    // Generate case number from exception
+    const generateCaseNumber = (exceptionId: string, createdAt: string): string => {
+      const date = new Date(createdAt)
+      const year = date.getFullYear()
+      const month = String(date.getMonth() + 1).padStart(2, '0')
+      const day = String(date.getDate()).padStart(2, '0')
+      const hours = String(date.getHours()).padStart(2, '0')
+      const minutes = String(date.getMinutes()).padStart(2, '0')
+      const seconds = String(date.getSeconds()).padStart(2, '0')
+      const uuidPrefix = exceptionId?.substring(0, 4)?.toUpperCase() || 'CASE'
+      return `CASE-${year}${month}${day}-${hours}${minutes}${seconds}-${uuidPrefix}`
+    }
+    
+    const formatUserName = (user: any): string => {
+      if (!user) return 'Unknown'
+      if (user.full_name) return user.full_name
+      if (user.first_name && user.last_name) return `${user.first_name} ${user.last_name}`
+      return user.email || 'Unknown'
+    }
+
+    const caseStatusFromNotes = getCaseStatusFromNotes(caseData.notes)
+    const isInRehab = !!rehabPlan
+    const todayDate = new Date()
+    todayDate.setHours(0, 0, 0, 0)
+    const startDate = new Date(caseData.start_date)
+    startDate.setHours(0, 0, 0, 0)
+    const endDate = caseData.end_date ? new Date(caseData.end_date) : null
+    if (endDate) endDate.setHours(0, 0, 0, 0)
+    const isCurrentlyActive = todayDate >= startDate && (!endDate || todayDate <= endDate) && caseData.is_active
+
+    let priority = 'MEDIUM'
+    if (caseData.exception_type === 'injury' || caseData.exception_type === 'accident') {
+      priority = 'HIGH'
+    } else if (caseData.exception_type === 'medical_leave') {
+      priority = 'MEDIUM'
+    } else {
+      priority = 'LOW'
+    }
+
+    // Get worker's user data from database
+    const { data: workerUser } = await adminClient
+      .from('users')
+      .select('id, email, first_name, last_name, full_name')
+      .eq('id', user.id)
+      .single()
+
+    const formattedCase = {
+      id: caseData.id,
+      caseNumber: generateCaseNumber(caseData.id, caseData.created_at),
+      workerId: caseData.user_id,
+      workerName: formatUserName(workerUser),
+      workerEmail: workerUser?.email || user.email || '',
+      workerInitials: (workerUser?.first_name?.[0]?.toUpperCase() || '') + (workerUser?.last_name?.[0]?.toUpperCase() || '') || 'U',
+      teamId: caseData.team_id,
+      teamName: team?.name || '',
+      siteLocation: team?.site_location || '',
+      supervisorName: formatUserName(supervisor),
+      teamLeaderName: formatUserName(teamLeader),
+      type: caseData.exception_type,
+      reason: caseData.reason || '',
+      startDate: caseData.start_date,
+      endDate: caseData.end_date,
+      status: mapCaseStatusToDisplay(caseStatusFromNotes, isInRehab, isCurrentlyActive),
+      priority,
+      isActive: isCurrentlyActive,
+      isInRehab,
+      caseStatus: caseStatusFromNotes || null,
+      notes: caseData.notes || null,
+      createdAt: caseData.created_at,
+      updatedAt: caseData.updated_at,
+      return_to_work_duty_type: caseData.return_to_work_duty_type || null,
+      return_to_work_date: caseData.return_to_work_date || null,
+    }
+
+    return c.json({ case: formattedCase }, 200)
+  } catch (error: any) {
+    console.error('[GET /worker/cases/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
 

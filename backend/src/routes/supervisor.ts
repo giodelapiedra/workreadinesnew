@@ -3,98 +3,16 @@ import bcrypt from 'bcrypt'
 import { supabase } from '../lib/supabase.js'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.js'
 import { getCaseStatusFromNotes } from '../utils/caseStatus.js'
+import { parseIncidentNotes, extractReturnToWorkData } from '../utils/notesParser.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { isValidEmail } from '../middleware/security.js'
+// Import optimized utility functions
+import { getTodayDateString, getTodayDate, getStartOfWeekDateString, getFirstDayOfMonthString, dateToDateString } from '../utils/dateUtils.js'
+import { validateTeamId, validatePassword, validateStringInput, validateEmail } from '../utils/validationUtils.js'
+import { isExceptionActive, getWorkersWithActiveExceptions } from '../utils/exceptionUtils.js'
+import { formatTeamLeader, formatUserFullName, getUserInitials } from '../utils/userUtils.js'
 
 const supervisor = new Hono<{ Variables: AuthVariables }>()
-
-// ============================================
-// Helper Functions - Optimized & Reusable
-// ============================================
-
-/**
- * Check if an exception is active for a given date
- * @param exception - Exception object with start_date and optional end_date
- * @param checkDate - Date to check (defaults to today)
- * @returns boolean - true if exception is active
- */
-function isExceptionActive(exception: { start_date: string; end_date?: string | null; deactivated_at?: string | null }, checkDate: Date): boolean {
-  // If exception was deactivated, check if deactivation was before or on the checkDate
-  if (exception.deactivated_at) {
-    const deactivatedDate = new Date(exception.deactivated_at)
-    deactivatedDate.setHours(0, 0, 0, 0)
-    checkDate.setHours(0, 0, 0, 0)
-    // If deactivated before or on checkDate, exception was not active on that date
-    if (deactivatedDate < checkDate || deactivatedDate.getTime() === checkDate.getTime()) {
-      return false
-    }
-  }
-  
-  const startDate = new Date(exception.start_date)
-  const endDate = exception.end_date ? new Date(exception.end_date) : null
-  return checkDate >= startDate && (!endDate || checkDate <= endDate)
-}
-
-/**
- * Filter workers with active exceptions for today
- * @param exceptions - Array of exception objects
- * @param todayDate - Today's date
- * @returns Set of user IDs with active exceptions
- */
-function getWorkersWithActiveExceptions(exceptions: any[], todayDate: Date): Set<string> {
-  const workersWithExceptions = new Set<string>()
-  if (!exceptions || exceptions.length === 0) {
-    return workersWithExceptions
-  }
-  
-  exceptions.forEach((exception) => {
-    if (isExceptionActive(exception, todayDate)) {
-      workersWithExceptions.add(exception.user_id)
-    }
-  })
-  
-  return workersWithExceptions
-}
-
-
-/**
- * Validate password strength
- * @param password - Password to validate
- * @returns { valid: boolean; error?: string }
- */
-function validatePassword(password: string): { valid: boolean; error?: string } {
-  if (!password || typeof password !== 'string') {
-    return { valid: false, error: 'Password is required' }
-  }
-  if (password.length < 8) {
-    return { valid: false, error: 'Password must be at least 8 characters' }
-  }
-  if (password.length > 128) {
-    return { valid: false, error: 'Password must be less than 128 characters' }
-  }
-  return { valid: true }
-}
-
-/**
- * Validate and sanitize string input
- * @param input - Input to validate
- * @param maxLength - Maximum length
- * @param fieldName - Field name for error messages
- * @returns { valid: boolean; value?: string; error?: string }
- */
-function validateStringInput(input: any, maxLength: number, fieldName: string): { valid: boolean; value?: string; error?: string } {
-  if (!input || typeof input !== 'string') {
-    return { valid: false, error: `${fieldName} is required` }
-  }
-  const trimmed = input.trim()
-  if (trimmed.length === 0) {
-    return { valid: false, error: `${fieldName} cannot be empty` }
-  }
-  if (trimmed.length > maxLength) {
-    return { valid: false, error: `${fieldName} must be less than ${maxLength} characters` }
-  }
-  return { valid: true, value: trimmed }
-}
 
 // Get supervisor dashboard data
 supervisor.get('/dashboard', authMiddleware, requireRole(['supervisor']), async (c) => {
@@ -109,10 +27,8 @@ supervisor.get('/dashboard', authMiddleware, requireRole(['supervisor']), async 
       return c.json({ error: 'Unauthorized' }, 401)
     }
 
-    const today = new Date().toISOString().split('T')[0]
-    const startOfWeek = new Date()
-    startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay())
-    const startOfWeekStr = startOfWeek.toISOString().split('T')[0]
+    const today = getTodayDateString()
+    const startOfWeekStr = getStartOfWeekDateString()
 
     // Get teams assigned to this supervisor
     const adminClient = getAdminClient()
@@ -469,10 +385,10 @@ supervisor.post('/team-leaders', authMiddleware, requireRole(['supervisor']), as
 
     const adminClient = getAdminClient()
 
-    // Get supervisor's business_name to inherit to team leader
+    // Get supervisor's business_name and business_registration_number to inherit to team leader
     const { data: supervisorData, error: supervisorError } = await adminClient
       .from('users')
-      .select('business_name')
+      .select('business_name, business_registration_number')
       .eq('id', user.id)
       .single()
 
@@ -480,6 +396,16 @@ supervisor.post('/team-leaders', authMiddleware, requireRole(['supervisor']), as
       console.error('Error fetching supervisor data:', supervisorError)
       return c.json({ error: 'Failed to fetch supervisor data', details: supervisorError.message }, 500)
     }
+
+    // Log supervisor data for debugging
+    console.log('Supervisor data for inheritance:', {
+      supervisor_id: user.id,
+      business_name: supervisorData?.business_name,
+      business_registration_number: supervisorData?.business_registration_number,
+    })
+
+    // Validate supervisor has business information (optional check - can be null for team leaders)
+    // Note: Team leaders inherit business info even if supervisor doesn't have it (will be null)
 
     // Check if email already exists
     const { data: existingUser } = await adminClient
@@ -522,6 +448,14 @@ supervisor.post('/team-leaders', authMiddleware, requireRole(['supervisor']), as
     const trimmedLastName = lastNameValidation.value!
     const fullName = `${trimmedFirstName} ${trimmedLastName}`.trim()
 
+    // Prepare business data - handle empty strings and null values
+    const inheritedBusinessName = supervisorData?.business_name 
+      ? (typeof supervisorData.business_name === 'string' ? supervisorData.business_name.trim() : supervisorData.business_name)
+      : null
+    const inheritedBusinessRegNumber = supervisorData?.business_registration_number
+      ? (typeof supervisorData.business_registration_number === 'string' ? supervisorData.business_registration_number.trim() : supervisorData.business_registration_number)
+      : null
+
     const userInsertData: any = {
       id: authData.user.id,
       email: email.trim().toLowerCase(), // Normalize email
@@ -530,19 +464,28 @@ supervisor.post('/team-leaders', authMiddleware, requireRole(['supervisor']), as
       first_name: trimmedFirstName,
       last_name: trimmedLastName,
       full_name: fullName,
-      business_name: supervisorData?.business_name || null, // Inherit from supervisor
+      business_name: inheritedBusinessName || null, // Inherit from supervisor
+      business_registration_number: inheritedBusinessRegNumber || null, // Inherit from supervisor
       created_at: new Date().toISOString(),
     }
+
+    // Log data being inserted for debugging
+    console.log('Creating team leader with data:', {
+      email: userInsertData.email,
+      business_name: userInsertData.business_name,
+      business_registration_number: userInsertData.business_registration_number,
+    })
 
     // Create user record in database
     const { data: userData, error: userError } = await adminClient
       .from('users')
       .insert([userInsertData])
-      .select()
+      .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number')
       .single()
 
     if (userError) {
       console.error('Database insert error:', userError)
+      console.error('Failed to insert user data:', JSON.stringify(userInsertData, null, 2))
       // Clean up auth user
       await supabase.auth.admin.deleteUser(authData.user.id)
       return c.json({ 
@@ -552,6 +495,14 @@ supervisor.post('/team-leaders', authMiddleware, requireRole(['supervisor']), as
         hint: userError.hint 
       }, 500)
     }
+
+    // Log successful creation
+    console.log('Team leader created successfully:', {
+      id: userData.id,
+      email: userData.email,
+      business_name: userData.business_name,
+      business_registration_number: userData.business_registration_number,
+    })
 
     // Create team for the team leader, assigned to this supervisor
     const { data: team, error: teamError } = await adminClient
@@ -627,8 +578,8 @@ supervisor.get('/teams', authMiddleware, requireRole(['supervisor']), async (c) 
     const teamIds = (teams || []).map(t => t.id)
     const teamLeaderIds = (teams || []).map(t => t.team_leader_id).filter(Boolean)
     
-    const today = new Date().toISOString().split('T')[0]
-    const todayDate = new Date(today)
+    const today = getTodayDateString()
+    const todayDate = getTodayDate()
     
     // Parallel fetch of all team-related data
     const [
@@ -666,7 +617,7 @@ supervisor.get('/teams', authMiddleware, requireRole(['supervisor']), async (c) 
       teamIds.length > 0
         ? adminClient
             .from('worker_exceptions')
-            .select('id, team_id')
+            .select('id, team_id, user_id, start_date, end_date, is_active, deactivated_at')
             .in('team_id', teamIds)
         : Promise.resolve({ data: [] }),
     ])
@@ -722,25 +673,7 @@ supervisor.get('/teams', authMiddleware, requireRole(['supervisor']), async (c) 
           id: team.id,
           name: team.name,
           siteLocation: team.site_location,
-          teamLeader: teamLeader ? {
-            id: teamLeader.id,
-            email: teamLeader.email,
-            firstName: teamLeader.first_name,
-            lastName: teamLeader.last_name,
-            fullName: teamLeader.full_name || 
-                     (teamLeader.first_name && teamLeader.last_name 
-                       ? `${teamLeader.first_name} ${teamLeader.last_name}`
-                       : teamLeader.email),
-            initials: (teamLeader.full_name || 
-                      (teamLeader.first_name && teamLeader.last_name 
-                        ? `${teamLeader.first_name} ${teamLeader.last_name}`
-                        : teamLeader.email))
-              .split(' ')
-              .map((n: string) => n[0])
-              .join('')
-              .toUpperCase()
-              .slice(0, 2),
-          } : null,
+          teamLeader: teamLeader ? formatTeamLeader(teamLeader) : null,
           memberCount, // Total members including those with exceptions
           activeMemberCount, // Members without active exceptions (should be used for compliance calculation)
           exceptionCount: workersWithExceptions.size, // Number of workers with active exceptions
@@ -771,12 +704,14 @@ supervisor.delete('/teams/:teamId', authMiddleware, requireRole(['supervisor']),
     const { password } = await c.req.json()
 
     // SECURITY: Validate inputs
-    if (!password || typeof password !== 'string' || password.trim() === '') {
-      return c.json({ error: 'Password is required to delete team' }, 400)
+    const passwordValidation = validatePassword(password)
+    if (!passwordValidation.valid) {
+      return c.json({ error: passwordValidation.error || 'Password is required to delete team' }, 400)
     }
 
-    if (!teamId || typeof teamId !== 'string' || teamId.length > 36) {
-      return c.json({ error: 'Invalid team ID' }, 400)
+    const teamIdValidation = validateTeamId(teamId)
+    if (!teamIdValidation.valid) {
+      return c.json({ error: teamIdValidation.error }, 400)
     }
 
     const adminClient = getAdminClient()
@@ -933,8 +868,9 @@ supervisor.get('/teams/:teamId/members', authMiddleware, requireRole(['superviso
     const teamId = c.req.param('teamId')
     
     // SECURITY: Validate teamId format (UUID)
-    if (!teamId || typeof teamId !== 'string' || teamId.length > 36) {
-      return c.json({ error: 'Invalid team ID' }, 400)
+    const teamIdValidation = validateTeamId(teamId)
+    if (!teamIdValidation.valid) {
+      return c.json({ error: teamIdValidation.error }, 400)
     }
 
     const adminClient = getAdminClient()
@@ -978,8 +914,8 @@ supervisor.get('/teams/:teamId/members', authMiddleware, requireRole(['superviso
       })
     }
 
-    const today = new Date().toISOString().split('T')[0]
-    const todayDate = new Date(today)
+    const today = getTodayDateString()
+    const todayDate = getTodayDate()
 
     // OPTIMIZATION: Parallel fetch of users and exceptions
     const [
@@ -1081,8 +1017,8 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
     const { cache, CacheManager } = await import('../utils/cache.js')
     
     // Get date filters from query params
-    const startDate = c.req.query('startDate') || new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0]
-    const endDate = c.req.query('endDate') || new Date().toISOString().split('T')[0]
+    const startDate = c.req.query('startDate') || getFirstDayOfMonthString()
+    const endDate = c.req.query('endDate') || getTodayDateString()
 
     // Generate cache key
     const cacheKey = CacheManager.generateKey('supervisor-analytics', {
@@ -1209,33 +1145,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
 
     const teamLeaderMap = new Map((teamLeaders || []).map(tl => [tl.id, tl]))
 
-    // Helper function to check if exception is active on a specific date
-    // This uses deactivated_at timestamp to ensure historical accuracy
-    const isExceptionActiveOnDate = (exception: { start_date: string; end_date?: string | null; deactivated_at?: string | null }, checkDate: Date): boolean => {
-      // If exception was deactivated, check if deactivation was before or on the checkDate
-      if (exception.deactivated_at) {
-        const deactivatedDate = new Date(exception.deactivated_at)
-        deactivatedDate.setHours(0, 0, 0, 0)
-        checkDate.setHours(0, 0, 0, 0)
-        // If deactivated before or on checkDate, exception was not active on that date
-        if (deactivatedDate < checkDate) {
-          return false
-        }
-        // If deactivated on the same day, we need to check if it was active during that day
-        // For simplicity, if deactivated on the same day, consider it inactive for analytics
-        if (deactivatedDate.getTime() === checkDate.getTime()) {
-          return false
-        }
-      }
-      
-      // Check date range overlap
-      const startDate = new Date(exception.start_date)
-      startDate.setHours(0, 0, 0, 0)
-      const endDate = exception.end_date ? new Date(exception.end_date) : null
-      if (endDate) endDate.setHours(23, 59, 59, 999)
-      checkDate.setHours(0, 0, 0, 0)
-      return checkDate >= startDate && (!endDate || checkDate <= endDate)
-    }
+    // Use utility function isExceptionActive instead of duplicate local function
 
     // Get all exceptions for workers in supervisor's teams (regardless of is_active status)
     // This ensures historical exceptions that were closed/removed are still counted in analytics
@@ -1360,7 +1270,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
           
           // Check if this date matches the schedule's day_of_week
           if (dayOfWeek === schedule.day_of_week) {
-            const dateStr = d.toISOString().split('T')[0]
+            const dateStr = dateToDateString(d)
             if (!schedulesByDate.has(dateStr)) {
               schedulesByDate.set(dateStr, new Set())
             }
@@ -1396,7 +1306,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
     const validCheckIns = (allCheckIns || []).filter((checkIn: any) => {
       const checkInDate = new Date(checkIn.check_in_date)
       const workerExceptions = exceptionsByWorker.get(checkIn.user_id) || []
-      return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkInDate))
+      return !workerExceptions.some(exception => isExceptionActive(exception, checkInDate))
     })
 
     // Calculate expected check-ins (only on scheduled days, excluding exception days)
@@ -1419,7 +1329,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
       const activeWorkersOnDate = Array.from(workersWithScheduleOnDate).filter(workerId => {
         // Check if worker has exception on this date
         const workerExceptions = exceptionsByWorker.get(workerId) || []
-        return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
+        return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
       })
       
       totalExpectedCheckIns += activeWorkersOnDate.length
@@ -1485,7 +1395,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
     // Count active members (without exceptions on end date)
     const activeWorkers = allWorkerIds.filter(workerId => {
       const workerExceptions = exceptionsByWorker.get(workerId) || []
-      return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, endDateObj))
+      return !workerExceptions.some(exception => isExceptionActive(exception, endDateObj))
     })
 
     // Team statistics
@@ -1518,7 +1428,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
           
           // Check if worker has exception on this date
           const workerExceptions = exceptionsByWorker.get(workerId) || []
-          return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
+          return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
         })
         
         teamExpectedCheckIns += activeWorkersOnDate.length
@@ -1537,7 +1447,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
         totalMembers: teamMembers.length,
         activeMembers: teamWorkerIds.filter(workerId => {
           const workerExceptions = exceptionsByWorker.get(workerId) || []
-          return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, endDateObj))
+          return !workerExceptions.some(exception => isExceptionActive(exception, endDateObj))
         }).length,
         completionRate: teamCompletionRate,
         totalCheckIns: uniqueTeamCheckIns, // Use unique count, not total check-ins
@@ -1592,7 +1502,7 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
       
       const activeWorkersOnDate = Array.from(workersWithScheduleOnDate).filter(workerId => {
         const workerExceptions = exceptionsByWorker.get(workerId) || []
-        return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, checkDate))
+        return !workerExceptions.some(exception => isExceptionActive(exception, checkDate))
       }).length
       
       dailyTrendsMap.set(dateStr, {
@@ -1633,11 +1543,11 @@ supervisor.get('/analytics', authMiddleware, requireRole(['supervisor']), async 
     }
     
     // Also calculate today's status for reference (if needed elsewhere)
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
     const todayCheckIns = validCheckIns.filter((c: any) => c.check_in_date === today)
     const todayActiveWorkers = allWorkerIds.filter(workerId => {
       const workerExceptions = exceptionsByWorker.get(workerId) || []
-      return !workerExceptions.some(exception => isExceptionActiveOnDate(exception, new Date(today)))
+      return !workerExceptions.some(exception => isExceptionActive(exception, new Date(today)))
     })
     const todayReadinessDistribution = {
       green: todayCheckIns.filter((c: any) => c.predicted_readiness === 'Green').length,
@@ -1897,7 +1807,7 @@ supervisor.get('/incidents', authMiddleware, requireRole(['supervisor']), async 
       .in('exception_type', incidentTypes) // Only incident-worthy exceptions
 
     // Filter by status
-    const todayStr = new Date().toISOString().split('T')[0]
+    const todayStr = getTodayDateString()
     if (status === 'active') {
       query = query.eq('is_active', true).gte('start_date', todayStr).or(`end_date.is.null,end_date.gte.${todayStr}`)
       countQuery = countQuery.eq('is_active', true).gte('start_date', todayStr).or(`end_date.is.null,end_date.gte.${todayStr}`)
@@ -2027,25 +1937,21 @@ supervisor.get('/incidents', authMiddleware, requireRole(['supervisor']), async 
       const endDate = incident.end_date ? new Date(incident.end_date) : null
       const isCurrentlyActive = todayDate >= startDate && (!endDate || todayDate <= endDate) && incident.is_active
 
-      // Extract case status and other information from notes
-      let caseStatus: string | null = null
-      let approvedBy: string | null = null
-      let approvedAt: string | null = null
-      let returnToWorkDutyType: string | null = null
-      let returnToWorkDate: string | null = null
+      // OPTIMIZATION: Use centralized notes parser
+      const caseStatus = getCaseStatusFromNotes(incident.notes)
+      const parsedNotes = parseIncidentNotes(incident.notes)
+      const returnToWorkData = extractReturnToWorkData(
+        incident.notes,
+        incident.return_to_work_duty_type,
+        incident.return_to_work_date
+      )
       
-      if (incident.notes) {
-        try {
-          const notesData = JSON.parse(incident.notes)
-          caseStatus = notesData.case_status || null
-          approvedBy = notesData.approved_by || null
-          approvedAt = notesData.approved_at || null
-          returnToWorkDutyType = notesData.return_to_work_duty_type || null
-          returnToWorkDate = notesData.return_to_work_date || null
-        } catch {
-          // Notes is not JSON, ignore
-        }
-      }
+      const approvedBy = parsedNotes?.approved_by || null
+      const approvedAt = parsedNotes?.approved_at || null
+      const returnToWorkDutyType = returnToWorkData.dutyType
+      const returnToWorkDate = returnToWorkData.returnDate
+      const clinicalNotes = parsedNotes?.clinical_notes || null
+      const clinicalNotesUpdatedAt = parsedNotes?.clinical_notes_updated_at || null
 
       return {
         id: incident.id,
@@ -2075,6 +1981,8 @@ supervisor.get('/incidents', authMiddleware, requireRole(['supervisor']), async 
         approvedAt: approvedAt,
         returnToWorkDutyType: returnToWorkDutyType || incident.return_to_work_duty_type || null,
         returnToWorkDate: returnToWorkDate || incident.return_to_work_date || null,
+        clinicalNotes: clinicalNotes,
+        clinicalNotesUpdatedAt: clinicalNotesUpdatedAt,
         createdAt: incident.created_at,
         updatedAt: incident.updated_at,
       }
@@ -2219,20 +2127,9 @@ supervisor.post('/incidents', authMiddleware, requireRole(['supervisor']), async
 
     if (existingException) {
       // Check if case is closed (case_status in notes)
-      let isClosed = false
-      if (existingException.notes) {
-        try {
-          const notesData = typeof existingException.notes === 'string' 
-            ? JSON.parse(existingException.notes) 
-            : existingException.notes
-          const caseStatus = notesData?.case_status?.toLowerCase()
-          isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
-        } catch {
-          // If notes is not JSON, try regex match (backward compatibility)
-          const caseStatus = existingException.notes.match(/case_status["\s]*[:=]["\s]*([^,}\s"]+)/i)?.[1]?.toLowerCase()
-          isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
-        }
-      }
+      // OPTIMIZATION: Use centralized notes parser
+      const caseStatus = getCaseStatusFromNotes(existingException.notes)
+      let isClosed = caseStatus === 'closed' || caseStatus === 'return_to_work'
       
       // Also check deactivated_at timestamp (if case was closed by supervisor)
       if (!isClosed && existingException.deactivated_at) {
@@ -2645,7 +2542,7 @@ supervisor.patch('/incidents/:incidentId/close', authMiddleware, requireRole(['s
     }
 
     // Update exception to inactive and set deactivated_at timestamp
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
     const { data: updated, error: updateError } = await adminClient
       .from('worker_exceptions')
       .update({
@@ -2808,8 +2705,8 @@ supervisor.get('/my-incidents', authMiddleware, requireRole(['supervisor']), asy
     const startDateParam = c.req.query('startDate')
     const endDateParam = c.req.query('endDate')
     
-    const startDate = startDateParam || defaultStartDate.toISOString().split('T')[0]
-    const endDate = endDateParam || today.toISOString().split('T')[0]
+    const startDate = startDateParam || dateToDateString(defaultStartDate)
+    const endDate = endDateParam || dateToDateString(today)
     
     // Validate date range (max 2 years to prevent performance issues)
     const startDateObj = new Date(startDate)
@@ -2842,6 +2739,8 @@ supervisor.get('/my-incidents', authMiddleware, requireRole(['supervisor']), asy
         updated_at,
         assigned_to_whs,
         clinician_id,
+        return_to_work_duty_type,
+        return_to_work_date,
         users!worker_exceptions_user_id_fkey(
           id,
           email,
@@ -2874,31 +2773,22 @@ supervisor.get('/my-incidents', authMiddleware, requireRole(['supervisor']), asy
       // Extract case status from notes
       const caseStatus = getCaseStatusFromNotes(incident.notes)
       
-      // Parse notes to get approval information
-      let approvedByClinician: string | null = null
-      let approvedAt: string | null = null
-      let whsApprovedBy: string | null = null
-      let whsApprovedAt: string | null = null
+      // OPTIMIZATION: Use centralized notes parser
+      const parsedNotes = parseIncidentNotes(incident.notes)
+      const returnToWorkData = extractReturnToWorkData(
+        incident.notes,
+        incident.return_to_work_duty_type,
+        incident.return_to_work_date
+      )
       
-      if (incident.notes) {
-        try {
-          const notesData = JSON.parse(incident.notes)
-          if (notesData.approved_by) {
-            approvedByClinician = notesData.approved_by
-          }
-          if (notesData.approved_at) {
-            approvedAt = notesData.approved_at
-          }
-          if (notesData.whs_approved_by) {
-            whsApprovedBy = notesData.whs_approved_by
-          }
-          if (notesData.whs_approved_at) {
-            whsApprovedAt = notesData.whs_approved_at
-          }
-        } catch {
-          // Notes is not JSON, ignore
-        }
-      }
+      const approvedByClinician = parsedNotes?.approved_by || null
+      const approvedAt = parsedNotes?.approved_at || null
+      const whsApprovedBy = parsedNotes?.whs_approved_by || null
+      const whsApprovedAt = parsedNotes?.whs_approved_at || null
+      const returnToWorkDutyType = returnToWorkData.dutyType
+      const returnToWorkDate = returnToWorkData.returnDate
+      const clinicalNotes = parsedNotes?.clinical_notes || null
+      const clinicalNotesUpdatedAt = parsedNotes?.clinical_notes_updated_at || null
       
       // Determine status category for Kanban board
       let statusCategory: 'in_progress' | 'rehabilitation' | 'completed' = 'in_progress'
@@ -2936,6 +2826,10 @@ supervisor.get('/my-incidents', authMiddleware, requireRole(['supervisor']), asy
         approvedAt,
         whsApprovedBy,
         whsApprovedAt,
+        returnToWorkDutyType,
+        returnToWorkDate,
+        clinicalNotes,
+        clinicalNotesUpdatedAt,
         createdAt: incident.created_at,
         updatedAt: incident.updated_at,
       }

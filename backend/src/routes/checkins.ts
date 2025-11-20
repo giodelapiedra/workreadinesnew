@@ -4,6 +4,7 @@ import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.j
 import { getCaseStatusFromNotes } from '../utils/caseStatus.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { parseTime, compareTime, formatDateString, parseDateString } from '../utils/dateTime.js'
+import { getTodayDateString, dateToDateString } from '../utils/dateUtils.js'
 
 // Date/time utilities are now imported from '../utils/dateTime'
 
@@ -487,7 +488,7 @@ checkins.get('/status', authMiddleware, requireRole(['worker']), async (c) => {
       return c.json({ error: 'Forbidden: This endpoint is only accessible to workers' }, 403)
     }
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
     const adminClient = getAdminClient()
 
     // Check for active exception first (include notes to get case_status)
@@ -628,7 +629,7 @@ checkins.get('/warm-up/status', authMiddleware, requireRole(['worker']), async (
       return c.json({ error: 'Forbidden: This endpoint is only accessible to workers' }, 403)
     }
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
     const adminClient = getAdminClient()
 
     const { data: warmUp } = await adminClient
@@ -709,7 +710,7 @@ checkins.get('/dashboard', authMiddleware, requireRole(['worker']), async (c) =>
     }
 
     const adminClient = getAdminClient()
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
 
     // Parallel queries for better performance
@@ -879,7 +880,7 @@ checkins.get('/next-shift-info', authMiddleware, requireRole(['worker']), async 
 })
 
 // Submit daily check-in (worker only)
-checkins.post('/', authMiddleware, requireRole(['worker']), async (c) => {
+checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
   try {
     const user = c.get('user')
     if (!user) {
@@ -943,7 +944,7 @@ checkins.post('/', authMiddleware, requireRole(['worker']), async (c) => {
       .eq('user_id', user.id)
       .single()
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
 
     // Insert or update check-in (one per day per user)
     const { data: checkIn, error: checkInError } = await adminClient
@@ -1138,7 +1139,7 @@ checkins.post('/warm-up', authMiddleware, requireRole(['worker']), async (c) => 
       .eq('user_id', user.id)
       .single()
 
-    const today = new Date().toISOString().split('T')[0]
+    const today = getTodayDateString()
 
     // Insert or update warm-up (one per day per user)
     const { data: warmUp, error: warmUpError } = await supabase
@@ -1387,7 +1388,7 @@ checkins.get('/rehabilitation-plan/completions', authMiddleware, requireRole(['w
     }
 
     const planId = c.req.query('plan_id')
-    const date = c.req.query('date') || new Date().toISOString().split('T')[0]
+    const date = c.req.query('date') || getTodayDateString()
 
     if (!planId) {
       return c.json({ error: 'plan_id is required' }, 400)

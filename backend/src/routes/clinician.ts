@@ -1,8 +1,10 @@
 import { Hono } from 'hono'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.js'
 import { getCaseStatusFromNotes, mapCaseStatusToDisplay, isValidCaseStatus } from '../utils/caseStatus.js'
+import { parseIncidentNotes } from '../utils/notesParser.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { formatDateString, parseDateString } from '../utils/dateTime.js'
+import { getTodayDateString, dateToDateString } from '../utils/dateUtils.js'
 
 const clinician = new Hono<{ Variables: AuthVariables }>()
 
@@ -43,6 +45,131 @@ const sanitizeString = (input: any, maxLength?: number): string => {
   return maxLength ? trimmed.substring(0, maxLength) : trimmed
 }
 
+// OPTIMIZATION: Validate transcription ID format (reusable)
+const validateTranscriptionId = (id: any): { valid: boolean; error?: string } => {
+  if (!id || typeof id !== 'string' || id.length > 36) {
+    return { valid: false, error: 'Invalid transcription ID format' }
+  }
+  // Basic UUID format check (8-4-4-4-12 hex characters)
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (!uuidRegex.test(id)) {
+    return { valid: false, error: 'Invalid transcription ID format' }
+  }
+  return { valid: true }
+}
+
+// SECURITY: Validate analysis object structure (deep validation)
+const validateAnalysisObject = (analysis: any): { valid: boolean; error?: string } => {
+  if (analysis === undefined || analysis === null) {
+    return { valid: true } // Optional field
+  }
+  
+  if (typeof analysis !== 'object' || Array.isArray(analysis)) {
+    return { valid: false, error: 'Analysis must be a valid object' }
+  }
+
+  // SECURITY: Limit object size to prevent DoS
+  const analysisStr = JSON.stringify(analysis)
+  if (analysisStr.length > 50000) { // 50KB limit
+    return { valid: false, error: 'Analysis object too large. Maximum size is 50KB' }
+  }
+
+  // SECURITY: Validate structure - only allow expected fields
+  const allowedKeys = ['summary', 'keyPoints', 'recommendations', 'concerns', 'actionItems']
+  const analysisKeys = Object.keys(analysis)
+  
+  // Check if all keys are allowed
+  for (const key of analysisKeys) {
+    if (!allowedKeys.includes(key)) {
+      return { valid: false, error: `Invalid analysis field: ${key}. Allowed fields: ${allowedKeys.join(', ')}` }
+    }
+  }
+
+  // Validate summary if present
+  if (analysis.summary !== undefined) {
+    if (typeof analysis.summary !== 'string') {
+      return { valid: false, error: 'Analysis summary must be a string' }
+    }
+    if (analysis.summary.length > 5000) {
+      return { valid: false, error: 'Analysis summary too long. Maximum length is 5,000 characters' }
+    }
+  }
+
+  // Validate keyPoints if present
+  if (analysis.keyPoints !== undefined) {
+    if (!Array.isArray(analysis.keyPoints)) {
+      return { valid: false, error: 'Analysis keyPoints must be an array' }
+    }
+    if (analysis.keyPoints.length > 100) {
+      return { valid: false, error: 'Too many key points. Maximum is 100' }
+    }
+    for (let i = 0; i < analysis.keyPoints.length; i++) {
+      if (typeof analysis.keyPoints[i] !== 'string') {
+        return { valid: false, error: `Key point ${i + 1} must be a string` }
+      }
+      if (analysis.keyPoints[i].length > 1000) {
+        return { valid: false, error: `Key point ${i + 1} too long. Maximum length is 1,000 characters` }
+      }
+    }
+  }
+
+  // Validate actionItems if present
+  if (analysis.actionItems !== undefined) {
+    if (!Array.isArray(analysis.actionItems)) {
+      return { valid: false, error: 'Analysis actionItems must be an array' }
+    }
+    if (analysis.actionItems.length > 100) {
+      return { valid: false, error: 'Too many action items. Maximum is 100' }
+    }
+    for (let i = 0; i < analysis.actionItems.length; i++) {
+      if (typeof analysis.actionItems[i] !== 'string') {
+        return { valid: false, error: `Action item ${i + 1} must be a string` }
+      }
+      if (analysis.actionItems[i].length > 1000) {
+        return { valid: false, error: `Action item ${i + 1} too long. Maximum length is 1,000 characters` }
+      }
+    }
+  }
+
+  // Validate recommendations if present
+  if (analysis.recommendations !== undefined) {
+    if (!Array.isArray(analysis.recommendations)) {
+      return { valid: false, error: 'Analysis recommendations must be an array' }
+    }
+    if (analysis.recommendations.length > 100) {
+      return { valid: false, error: 'Too many recommendations. Maximum is 100' }
+    }
+    for (let i = 0; i < analysis.recommendations.length; i++) {
+      if (typeof analysis.recommendations[i] !== 'string') {
+        return { valid: false, error: `Recommendation ${i + 1} must be a string` }
+      }
+      if (analysis.recommendations[i].length > 1000) {
+        return { valid: false, error: `Recommendation ${i + 1} too long. Maximum length is 1,000 characters` }
+      }
+    }
+  }
+
+  // Validate concerns if present
+  if (analysis.concerns !== undefined) {
+    if (!Array.isArray(analysis.concerns)) {
+      return { valid: false, error: 'Analysis concerns must be an array' }
+    }
+    if (analysis.concerns.length > 100) {
+      return { valid: false, error: 'Too many concerns. Maximum is 100' }
+    }
+    for (let i = 0; i < analysis.concerns.length; i++) {
+      if (typeof analysis.concerns[i] !== 'string') {
+        return { valid: false, error: `Concern ${i + 1} must be a string` }
+      }
+      if (analysis.concerns[i].length > 1000) {
+        return { valid: false, error: `Concern ${i + 1} too long. Maximum length is 1,000 characters` }
+      }
+    }
+  }
+
+  return { valid: true }
+}
+
 // Validate date input
 const validateDateInput = (dateStr: any): { valid: boolean; error?: string; date?: Date } => {
   if (!dateStr || typeof dateStr !== 'string') {
@@ -65,6 +192,30 @@ const validateDateInput = (dateStr: any): { valid: boolean; error?: string; date
   } catch {
     return { valid: false, error: 'Invalid date format. Expected YYYY-MM-DD' }
   }
+}
+
+// OPTIMIZATION: Validate and normalize time format (reusable)
+const validateAndNormalizeTime = (time: any): { valid: boolean; error?: string; normalized?: string } => {
+  if (time === undefined || time === null) {
+    return { valid: false, error: 'Time is required' }
+  }
+
+  const timeStr = String(time).trim()
+  if (!timeStr) {
+    return { valid: false, error: 'Time cannot be empty' }
+  }
+
+  // Accept both H:MM and HH:MM formats
+  const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/
+  if (!timeRegex.test(timeStr)) {
+    return { valid: false, error: 'Invalid time format. Expected HH:MM (e.g., 09:00 or 9:00)' }
+  }
+
+  // Normalize to HH:MM format (2-digit hours)
+  const [hours, minutes] = timeStr.split(':')
+  const normalized = `${hours.padStart(2, '0')}:${minutes}`
+
+  return { valid: true, normalized }
 }
 
 // OPTIMIZATION: Centralized utility for duty type label formatting
@@ -135,7 +286,7 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
       .eq('assigned_to_whs', true) // Only cases that were assigned to WHS
 
     // Filter by status
-    const todayStr = new Date().toISOString().split('T')[0]
+    const todayStr = getTodayDateString()
     if (status === 'active') {
       query = query.eq('is_active', true).gte('start_date', todayStr).or(`end_date.is.null,end_date.gte.${todayStr}`)
     } else if (status === 'closed') {
@@ -191,6 +342,9 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
     // Get rehabilitation plans for cases (to determine rehab status)
     // SECURITY & OPTIMIZATION: Only get plans for this clinician's cases
     const caseIds = (cases || []).map((c: any) => c.id)
+    const caseUserIds = (cases || []).map((c: any) => c.user_id).filter(Boolean)
+    const caseTeamIds = (cases || []).map((c: any) => c.team_id).filter(Boolean)
+    
     let rehabPlans: any[] = []
     if (caseIds.length > 0) {
       const { data: rehabPlansData, error: rehabError } = await adminClient
@@ -212,6 +366,25 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
       rehabPlans.forEach((plan: any) => {
         rehabMap.set(plan.exception_id, true)
       })
+    }
+
+    // OPTIMIZATION: Batch fetch team_members for phone numbers
+    let phoneMap = new Map<string, string>()
+    if (caseUserIds.length > 0 && caseTeamIds.length > 0) {
+      const { data: teamMembers, error: membersError } = await adminClient
+        .from('team_members')
+        .select('user_id, team_id, phone')
+        .in('user_id', caseUserIds)
+        .in('team_id', caseTeamIds)
+      
+      if (!membersError && teamMembers) {
+        teamMembers.forEach((member: any) => {
+          const key = `${member.user_id}_${member.team_id}`
+          if (member.phone) {
+            phoneMap.set(key, member.phone)
+          }
+        })
+      }
     }
 
     // Get supervisor and team leader info for all unique IDs (optimized batch fetch)
@@ -259,6 +432,10 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
       const team = incident.teams?.[0] || incident.teams
       const supervisor = team?.supervisor_id ? userMap.get(team.supervisor_id) : null
       const teamLeader = team?.team_leader_id ? userMap.get(team.team_leader_id) : null
+      
+      // Get phone from phoneMap
+      const phoneKey = `${incident.user_id}_${incident.team_id}`
+      const phone = phoneMap.get(phoneKey) || null
 
       // OPTIMIZATION: Cache date calculations
       const startDate = new Date(incident.start_date)
@@ -316,6 +493,10 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
         updatedAt: incident.updated_at,
         return_to_work_duty_type: incident.return_to_work_duty_type || null,
         return_to_work_date: incident.return_to_work_date || null,
+        phone: phone,
+        healthLink: null, // Not available in current schema
+        payer: null, // Not available in current schema
+        caseManager: !!teamLeader, // Team leader acts as case manager
       }
     })
 
@@ -379,9 +560,11 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
       
       if (isInRehab) {
         inRehabCount++
+        // Don't count as active if in rehab
+        continue
       }
       
-      // Everything else is active (not closed)
+      // Everything else is active (not closed, not in rehab)
       activeCount++
     }
 
@@ -413,6 +596,154 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
     })
   } catch (error: any) {
     console.error('[GET /clinician/cases] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get single case detail by ID (OPTIMIZED: Direct lookup instead of fetching all cases)
+clinician.get('/cases/:id', authMiddleware, requireRole(['clinician']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const caseId = c.req.param('id')
+    if (!caseId) {
+      return c.json({ error: 'Case ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // OPTIMIZATION: Get single case with related data in one query
+    const { data: caseData, error: caseError } = await adminClient
+      .from('worker_exceptions')
+      .select(`
+        *,
+        users!worker_exceptions_user_id_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        ),
+        teams!worker_exceptions_team_id_fkey(
+          id,
+          name,
+          site_location,
+          supervisor_id,
+          team_leader_id
+        )
+      `)
+      .eq('id', caseId)
+      .eq('clinician_id', user.id) // SECURITY: Only their assigned cases
+      .eq('assigned_to_whs', true)
+      .in('exception_type', ['injury', 'medical_leave', 'accident', 'other'])
+      .single()
+
+    if (caseError || !caseData) {
+      console.error('[GET /clinician/cases/:id] Error:', caseError)
+      return c.json({ error: 'Case not found or not authorized' }, 404)
+    }
+
+    // OPTIMIZATION: Parallel fetch of related data
+    const team = Array.isArray(caseData.teams) ? caseData.teams[0] : caseData.teams
+    const userIds = [team?.supervisor_id, team?.team_leader_id].filter(Boolean)
+    
+    const [teamMemberResult, usersResult, rehabPlanResult] = await Promise.all([
+      // Get phone number
+      adminClient
+        .from('team_members')
+        .select('phone')
+        .eq('user_id', caseData.user_id)
+        .eq('team_id', caseData.team_id)
+        .maybeSingle(),
+      
+      // Get supervisor and team leader info
+      userIds.length > 0
+        ? adminClient
+            .from('users')
+            .select('id, email, first_name, last_name, full_name')
+            .in('id', userIds)
+        : Promise.resolve({ data: [] }),
+      
+      // Check rehab status
+      adminClient
+        .from('rehabilitation_plans')
+        .select('id, status')
+        .eq('exception_id', caseId)
+        .eq('clinician_id', user.id)
+        .eq('status', 'active')
+        .maybeSingle()
+    ])
+
+    // Build user map for O(1) lookups
+    const userMap = new Map()
+    if (usersResult.data) {
+      usersResult.data.forEach((u: any) => userMap.set(u.id, u))
+    }
+
+    const user_data = Array.isArray(caseData.users) ? caseData.users[0] : caseData.users
+    const supervisor = userMap.get(team?.supervisor_id)
+    const teamLeader = userMap.get(team?.team_leader_id)
+    
+    // Determine case status
+    const caseStatusFromNotes = getCaseStatusFromNotes(caseData.notes)
+    const isInRehab = !!rehabPlanResult.data
+    const todayDate = new Date()
+    todayDate.setHours(0, 0, 0, 0)
+    const startDate = new Date(caseData.start_date)
+    startDate.setHours(0, 0, 0, 0)
+    const endDate = caseData.end_date ? new Date(caseData.end_date) : null
+    if (endDate) endDate.setHours(0, 0, 0, 0)
+    const isCurrentlyActive = todayDate >= startDate && (!endDate || todayDate <= endDate) && caseData.is_active
+
+    // Determine priority
+    let priority = 'MEDIUM'
+    if (caseData.exception_type === 'injury' || caseData.exception_type === 'accident') {
+      priority = 'HIGH'
+    } else if (caseData.exception_type === 'medical_leave') {
+      priority = 'MEDIUM'
+    } else {
+      priority = 'LOW'
+    }
+
+    const formattedCase = {
+      id: caseData.id,
+      caseNumber: generateCaseNumber(caseData.id, caseData.created_at),
+      workerId: caseData.user_id,
+      workerName: formatUserName(user_data),
+      workerEmail: user_data?.email || '',
+      workerInitials: (user_data?.first_name?.[0]?.toUpperCase() || '') + (user_data?.last_name?.[0]?.toUpperCase() || '') || 'U',
+      teamId: caseData.team_id,
+      teamName: team?.name || '',
+      siteLocation: team?.site_location || '',
+      supervisorName: formatUserName(supervisor),
+      teamLeaderName: formatUserName(teamLeader),
+      type: caseData.exception_type,
+      reason: caseData.reason || '',
+      startDate: caseData.start_date,
+      endDate: caseData.end_date,
+      status: mapCaseStatusToDisplay(caseStatusFromNotes, isInRehab, isCurrentlyActive),
+      priority,
+      isActive: isCurrentlyActive,
+      isInRehab,
+      caseStatus: caseStatusFromNotes || null,
+      notes: caseData.notes || null,
+      createdAt: caseData.created_at,
+      updatedAt: caseData.updated_at,
+      return_to_work_duty_type: caseData.return_to_work_duty_type || null,
+      return_to_work_date: caseData.return_to_work_date || null,
+      phone: teamMemberResult.data?.phone || null,
+    }
+
+    return c.json({ case: formattedCase }, 200, {
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+    })
+  } catch (error: any) {
+    console.error('[GET /clinician/cases/:id] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
@@ -1185,19 +1516,39 @@ clinician.patch('/cases/:id/status', authMiddleware, requireRole(['clinician']),
       return c.json({ error: 'Case not found or not assigned to you' }, 404)
     }
 
+    // BUSINESS RULE: Check for active rehabilitation plans before allowing return_to_work or closed
+    if (status === 'return_to_work' || status === 'closed') {
+      const { data: activePlans, error: plansError } = await adminClient
+        .from('rehabilitation_plans')
+        .select('id, status')
+        .eq('exception_id', caseId)
+        .eq('status', 'active')
+        .limit(1)
+
+      if (plansError) {
+        console.error('[PATCH /clinician/cases/:id/status] Error checking rehabilitation plans:', plansError)
+        return c.json({ error: 'Failed to check rehabilitation plans', details: plansError.message }, 500)
+      }
+
+      if (activePlans && activePlans.length > 0) {
+        return c.json({ 
+          error: 'Cannot update case status while active rehabilitation plans exist',
+          details: 'Please complete or cancel all active rehabilitation plans before marking the case as "Return to Work" or "Closed".'
+        }, 400)
+      }
+    }
+
     // OPTIMIZATION: Use user from auth context (already available, no need for extra query)
     // Only fetch from DB if we need additional user fields not in auth context
     const clinicianName = formatUserName(user)
 
-    // OPTIMIZATION: Parse notes once and reuse
-    let notesData: any = {}
-    if (caseItem.notes) {
-      try {
-        notesData = JSON.parse(caseItem.notes)
-      } catch {
-        // If notes is not JSON, preserve it as text
-        notesData = { original_notes: caseItem.notes }
-      }
+    // OPTIMIZATION: Use centralized notes parser
+    const parsedNotes = parseIncidentNotes(caseItem.notes)
+    let notesData: any = parsedNotes || {}
+    
+    // Preserve original notes if not JSON
+    if (caseItem.notes && !parsedNotes) {
+      notesData = { original_notes: caseItem.notes }
     }
     
     // BUSINESS RULE: If case is already "return_to_work", prevent changing back to earlier statuses
@@ -1236,7 +1587,7 @@ clinician.patch('/cases/:id/status', authMiddleware, requireRole(['clinician']),
     updates.notes = JSON.stringify(notesData)
 
     // OPTIMIZATION: Pre-calculate date string once
-    const todayDateStr = now.toISOString().split('T')[0]
+    const todayDateStr = dateToDateString(now)
 
     // Handle status-specific updates
     if (status === 'closed') {
@@ -1304,11 +1655,10 @@ clinician.patch('/cases/:id/status', authMiddleware, requireRole(['clinician']),
       return c.json({ error: 'Failed to update case status', details: updateError.message }, 500)
     }
 
-    // OPTIMIZATION: Create notification for WHS when case is closed/returned to work
+    // OPTIMIZATION: Create notifications when case is closed/returned to work
     if (status === 'closed' || status === 'return_to_work') {
       try {
-        // OPTIMIZATION: Reuse case data from update query instead of fetching again
-          // Get case details with worker and team info for notification
+        // OPTIMIZATION: Single query to get case details with worker and team info
           const { data: caseDetails } = await adminClient
             .from('worker_exceptions')
             .select(`
@@ -1326,48 +1676,33 @@ clinician.patch('/cases/:id/status', authMiddleware, requireRole(['clinician']),
                 id,
                 name,
                 site_location,
-                supervisor_id
+              supervisor_id,
+              team_leader_id
               )
             `)
             .eq('id', caseId)
             .single()
 
-        if (caseDetails) {
-          // OPTIMIZATION: Use existing helper function for case number generation
-          const caseNumber = generateCaseNumber(caseDetails.id, caseDetails.created_at)
+        if (!caseDetails) return
 
-          // OPTIMIZATION: Use existing helper function for name formatting
+        // OPTIMIZATION: Calculate common values once
+        const caseNumber = generateCaseNumber(caseDetails.id, caseDetails.created_at)
           const worker = Array.isArray(caseDetails.users) ? caseDetails.users[0] : caseDetails.users
           const workerName = formatUserName(worker)
-
-          // Get team info
           const team = Array.isArray(caseDetails.teams) ? caseDetails.teams[0] : caseDetails.teams
-
-          // Get all WHS users (batch fetch once)
-          const { data: whsUsers } = await adminClient
-            .from('users')
-            .select('id, email, first_name, last_name, full_name')
-            .eq('role', 'whs_control_center')
-
-          if (whsUsers && whsUsers.length > 0) {
             const statusLabel = status === 'closed' ? 'CLOSED' : 'RETURN TO WORK'
             const statusAction = status === 'closed' ? 'closed' : 'marked as return to work'
             
-            // OPTIMIZATION: Build notification message with return to work details if applicable
-            let notificationMessage = `Case ${caseNumber} has been ${statusAction} and approved by ${clinicianName}. Worker: ${workerName}.`
+        // OPTIMIZATION: Build return to work details once
+        let returnToWorkSuffix = ''
             if (status === 'return_to_work' && updates.return_to_work_duty_type && updates.return_to_work_date) {
               const dutyTypeLabel = formatDutyTypeLabel(updates.return_to_work_duty_type)
               const formattedReturnDate = formatReturnDateForNotification(updates.return_to_work_date)
-              notificationMessage += ` Duty Type: ${dutyTypeLabel}. Return Date: ${formattedReturnDate}.`
+          returnToWorkSuffix = ` Duty Type: ${dutyTypeLabel}. Return Date: ${formattedReturnDate}.`
             }
             
-            // Create notifications for all WHS users (batch insert)
-            const notifications = whsUsers.map((whsUser: any) => ({
-              user_id: whsUser.id,
-              type: 'case_closed',
-              title: `✅ Case ${statusLabel}`,
-              message: notificationMessage,
-              data: {
+        // OPTIMIZATION: Build common notification data once
+        const baseNotificationData = {
                 case_id: caseId,
                 case_number: caseNumber,
                 worker_id: caseDetails.user_id,
@@ -1387,81 +1722,103 @@ clinician.patch('/cases/:id/status', authMiddleware, requireRole(['clinician']),
                   return_to_work_duty_type: updates.return_to_work_duty_type,
                   return_to_work_date: updates.return_to_work_date,
                 }),
-              },
-              is_read: false,
-            }))
+        }
 
-            // Insert notifications in batch (optimized)
-            const { error: notifyError } = await adminClient
-              .from('notifications')
-              .insert(notifications)
+        // OPTIMIZATION: Build base message once
+        const baseMessage = `Case ${caseNumber} has been ${statusAction} and approved by ${clinicianName}. Worker: ${workerName}.${returnToWorkSuffix}`
+        const workerMessage = `Your case ${caseNumber} has been ${statusAction} and approved by ${clinicianName}.${returnToWorkSuffix}`
 
-            if (notifyError) {
-              console.error('[PATCH /clinician/cases/:id/status] Error creating notifications:', notifyError)
-              // Don't fail the request if notifications fail - case is still updated
-            } else {
-              console.log(`[PATCH /clinician/cases/:id/status] Created ${notifications.length} notification(s) for case ${caseNumber} (${statusLabel})`)
-            }
-          }
-
-          // Also notify the supervisor who originally reported the incident
-          if (team?.supervisor_id) {
-            const { data: supervisor } = await adminClient
+        // OPTIMIZATION: Batch fetch all users in parallel
+        const [whsUsersResult, supervisorResult, teamLeaderResult] = await Promise.all([
+          adminClient
               .from('users')
-              .select('id, email, first_name, last_name, full_name')
+            .select('id')
+            .eq('role', 'whs_control_center'),
+          team?.supervisor_id
+            ? adminClient
+                .from('users')
+                .select('id')
               .eq('id', team.supervisor_id)
               .eq('role', 'supervisor')
               .single()
+            : Promise.resolve({ data: null }),
+          team?.team_leader_id
+            ? adminClient
+                .from('users')
+                .select('id')
+                .eq('id', team.team_leader_id)
+                .eq('role', 'team_leader')
+                .single()
+            : Promise.resolve({ data: null }),
+        ])
 
-            if (supervisor) {
-              const statusLabel = status === 'closed' ? 'CLOSED' : 'RETURN TO WORK'
-              const statusAction = status === 'closed' ? 'closed' : 'marked as return to work'
+        const whsUsers = whsUsersResult.data || []
+        const supervisor = supervisorResult.data
+        const teamLeader = teamLeaderResult.data
               
-              // OPTIMIZATION: Build notification message with return to work details if applicable
-              let supervisorNotificationMessage = `Case ${caseNumber} has been ${statusAction} and approved by ${clinicianName}. Worker: ${workerName}.`
-              if (status === 'return_to_work' && updates.return_to_work_duty_type && updates.return_to_work_date) {
-                const dutyTypeLabel = formatDutyTypeLabel(updates.return_to_work_duty_type)
-                const formattedReturnDate = formatReturnDateForNotification(updates.return_to_work_date)
-                supervisorNotificationMessage += ` Duty Type: ${dutyTypeLabel}. Return Date: ${formattedReturnDate}.`
-              }
-              
-              const supervisorNotification = {
+        // OPTIMIZATION: Build all notifications in one array
+        const allNotifications: any[] = []
+
+        // WHS users notifications
+        if (Array.isArray(whsUsers) && whsUsers.length > 0) {
+          allNotifications.push(
+            ...whsUsers.map((whsUser: any) => ({
+              user_id: whsUser.id,
+              type: 'case_closed',
+              title: `✅ Case ${statusLabel}`,
+              message: baseMessage,
+              data: baseNotificationData,
+              is_read: false,
+            }))
+          )
+        }
+
+        // Supervisor notification
+        if (supervisor) {
+          allNotifications.push({
                 user_id: supervisor.id,
                 type: 'case_closed',
                 title: `✅ Case ${statusLabel}`,
-                message: supervisorNotificationMessage,
-                data: {
-                  case_id: caseId,
-                  case_number: caseNumber,
-                  worker_id: caseDetails.user_id,
-                  worker_name: workerName,
-                  worker_email: worker?.email || '',
-                  team_id: team?.id || null,
-                  team_name: team?.name || '',
-                  site_location: team?.site_location || '',
-                  status: status,
-                  status_label: statusLabel,
-                  approved_by: clinicianName,
-                  approved_by_id: user.id,
-                  approved_at: timestamp,
-                  clinician_id: user.id,
-                  clinician_name: clinicianName,
-                  ...(status === 'return_to_work' && {
-                    return_to_work_duty_type: updates.return_to_work_duty_type,
-                    return_to_work_date: updates.return_to_work_date,
-                  }),
-                },
+            message: baseMessage,
+            data: baseNotificationData,
                 is_read: false,
-              }
+          })
+        }
 
-              const { error: supervisorNotifyError } = await adminClient
+        // Team leader notification
+        if (teamLeader) {
+          allNotifications.push({
+            user_id: teamLeader.id,
+            type: 'case_closed',
+            title: `✅ Case ${statusLabel}`,
+            message: baseMessage,
+            data: baseNotificationData,
+            is_read: false,
+          })
+        }
+
+        // Worker notification
+        if (caseDetails.user_id) {
+          allNotifications.push({
+            user_id: caseDetails.user_id,
+            type: 'case_closed',
+            title: `✅ Case ${statusLabel}`,
+            message: workerMessage,
+            data: baseNotificationData,
+            is_read: false,
+          })
+        }
+
+        // OPTIMIZATION: Insert all notifications in a single batch
+        if (allNotifications.length > 0) {
+          const { error: notifyError } = await adminClient
                 .from('notifications')
-                .insert([supervisorNotification])
+            .insert(allNotifications)
 
-              if (supervisorNotifyError) {
-                console.error('[PATCH /clinician/cases/:id/status] Error creating supervisor notification:', supervisorNotifyError)
-              }
-            }
+          if (notifyError) {
+            console.error('[PATCH /clinician/cases/:id/status] Error creating notifications:', notifyError)
+          } else {
+            console.log(`[PATCH /clinician/cases/:id/status] Created ${allNotifications.length} notification(s) for case ${caseNumber} (${statusLabel})`)
           }
         }
       } catch (notificationError: any) {
@@ -1519,15 +1876,13 @@ clinician.post('/cases/:id/notes', authMiddleware, requireRole(['clinician']), a
       return c.json({ error: 'Case not found or not assigned to you' }, 404)
     }
 
-    // Parse existing notes if they exist
-    let notesData: any = {}
-    if (caseItem.notes) {
-      try {
-        notesData = JSON.parse(caseItem.notes)
-      } catch {
-        // If notes is not JSON, preserve it
-        notesData = { original_notes: caseItem.notes, clinical_notes: sanitizedNotes }
-      }
+    // OPTIMIZATION: Use centralized notes parser
+    const parsedNotes = parseIncidentNotes(caseItem.notes)
+    let notesData: any = parsedNotes || {}
+    
+    // Preserve original notes if not JSON
+    if (caseItem.notes && !parsedNotes) {
+      notesData = { original_notes: caseItem.notes, clinical_notes: sanitizedNotes }
     }
 
     // Update clinical notes
@@ -1942,11 +2297,12 @@ clinician.post('/appointments', authMiddleware, requireRole(['clinician']), asyn
       return c.json({ error: dateValidation.error || 'Invalid appointment_date' }, 400)
     }
 
-    // Validate time format (HH:MM)
-    const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/
-    if (!timeRegex.test(appointment_time)) {
-      return c.json({ error: 'Invalid appointment_time format. Expected HH:MM' }, 400)
+    // OPTIMIZATION: Validate and normalize time format
+    const timeValidation = validateAndNormalizeTime(appointment_time)
+    if (!timeValidation.valid || !timeValidation.normalized) {
+      return c.json({ error: timeValidation.error || 'Invalid appointment_time format' }, 400)
     }
+    const normalizedTime = timeValidation.normalized
 
     // Validate duration
     const duration = parseInt(String(duration_minutes))
@@ -1976,7 +2332,7 @@ clinician.post('/appointments', authMiddleware, requireRole(['clinician']), asyn
 
     // Check for conflicting appointments (same date/time)
     const appointmentDateStr = formatDateString(dateValidation.date!)
-    const [hour, minute] = appointment_time.split(':').map(Number)
+    const [hour, minute] = normalizedTime.split(':').map(Number)
     const appointmentStart = hour * 60 + minute
     const appointmentEnd = appointmentStart + duration
 
@@ -2015,7 +2371,7 @@ clinician.post('/appointments', authMiddleware, requireRole(['clinician']), asyn
         clinician_id: user.id,
         worker_id: caseItem.user_id,
         appointment_date: appointmentDateStr,
-        appointment_time,
+        appointment_time: normalizedTime,
         duration_minutes: duration,
         appointment_type,
         location: sanitizeString(location, 500) || null,
@@ -2123,13 +2479,20 @@ clinician.patch('/appointments/:id', authMiddleware, requireRole(['clinician']),
 
     const appointmentId = c.req.param('id')
     
-    // Validate appointment ID format (UUID)
+    // SECURITY: Validate appointment ID format (UUID)
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     if (!uuidRegex.test(appointmentId)) {
       return c.json({ error: 'Invalid appointment ID format' }, 400)
     }
 
-    const updates: any = await c.req.json()
+    // SECURITY: Parse JSON with error handling
+    let updates: any
+    try {
+      updates = await c.req.json()
+    } catch (parseError: any) {
+      console.error('[PATCH /clinician/appointments/:id] JSON parse error:', parseError)
+      return c.json({ error: 'Invalid JSON in request body' }, 400)
+    }
     
     // Validate that updates object exists and is not empty
     if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
@@ -2141,7 +2504,7 @@ clinician.patch('/appointments/:id', authMiddleware, requireRole(['clinician']),
     // Verify appointment exists and belongs to this clinician
     const { data: appointment, error: appointmentError } = await adminClient
       .from('appointments')
-      .select('id, clinician_id')
+      .select('id, clinician_id, status, appointment_date')
       .eq('id', appointmentId)
       .eq('clinician_id', user.id)
       .single()
@@ -2160,15 +2523,37 @@ clinician.patch('/appointments/:id', authMiddleware, requireRole(['clinician']),
       if (!dateValidation.valid || !dateValidation.date) {
         return c.json({ error: dateValidation.error || 'Invalid appointment_date' }, 400)
       }
-      updateData.appointment_date = formatDateString(dateValidation.date)
+      
+      const appointmentDate = formatDateString(dateValidation.date)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      const appointmentDateObj = new Date(dateValidation.date)
+      appointmentDateObj.setHours(0, 0, 0, 0)
+      
+      // Check if appointment date is in the past
+      const isPastDate = appointmentDateObj < today
+      
+      // Get current or new status to determine if past dates are allowed
+      const newStatus = updates.status || appointment.status
+      const allowsPastDate = ['completed', 'cancelled', 'declined'].includes(newStatus)
+      
+      // If date is in the past and status doesn't allow it, return error
+      if (isPastDate && !allowsPastDate) {
+        return c.json({ 
+          error: 'Cannot set appointment date in the past for pending or confirmed appointments. Please mark the appointment as completed, cancelled, or declined first.' 
+        }, 400)
+      }
+      
+      updateData.appointment_date = appointmentDate
     }
 
-    if (updates.appointment_time) {
-      const timeRegex = /^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$/
-      if (!timeRegex.test(updates.appointment_time)) {
-        return c.json({ error: 'Invalid appointment_time format. Expected HH:MM' }, 400)
+    if (updates.appointment_time !== undefined) {
+      // OPTIMIZATION: Validate and normalize time format using helper
+      const timeValidation = validateAndNormalizeTime(updates.appointment_time)
+      if (!timeValidation.valid || !timeValidation.normalized) {
+        return c.json({ error: timeValidation.error || 'Invalid appointment_time format' }, 400)
       }
-      updateData.appointment_time = updates.appointment_time
+      updateData.appointment_time = timeValidation.normalized
     }
 
     if (updates.duration_minutes !== undefined) {
@@ -2681,6 +3066,115 @@ clinician.delete('/transcriptions/:id', authMiddleware, requireRole(['clinician'
     console.error('[DELETE /clinician/transcriptions/:id] Error:', error)
     return c.json({ 
       error: 'Failed to delete transcription', 
+      details: error.message || 'Unknown error' 
+    }, 500)
+  }
+})
+
+// Update transcription (analysis and clinical notes)
+clinician.put('/transcriptions/:id', authMiddleware, requireRole(['clinician']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const transcriptionId = c.req.param('id')
+
+    // SECURITY: Validate transcription ID format (UUID)
+    const idValidation = validateTranscriptionId(transcriptionId)
+    if (!idValidation.valid) {
+      return c.json({ error: idValidation.error }, 400)
+    }
+
+    // SECURITY: Parse JSON with error handling
+    let requestBody: any
+    try {
+      requestBody = await c.req.json()
+    } catch (parseError: any) {
+      console.error('[PUT /clinician/transcriptions/:id] JSON parse error:', parseError)
+      return c.json({ error: 'Invalid JSON in request body' }, 400)
+    }
+
+    const { analysis, clinical_notes } = requestBody
+
+    // SECURITY: Validate analysis object structure (deep validation)
+    const analysisValidation = validateAnalysisObject(analysis)
+    if (!analysisValidation.valid) {
+      return c.json({ error: analysisValidation.error }, 400)
+    }
+
+    // SECURITY: Validate clinical notes if provided
+    if (clinical_notes !== undefined && typeof clinical_notes !== 'string') {
+      return c.json({ error: 'Clinical notes must be a string' }, 400)
+    }
+
+    // SECURITY: Validate clinical notes length
+    if (clinical_notes && clinical_notes.length > 10000) {
+      return c.json({ error: 'Clinical notes too long. Maximum length is 10,000 characters' }, 400)
+    }
+
+    // SECURITY: Validate and sanitize clinical notes
+    const sanitizedClinicalNotes = clinical_notes ? sanitizeString(clinical_notes, 10000) : null
+
+    const adminClient = getAdminClient()
+
+    // SECURITY: Verify transcription exists and is owned by logged-in clinician
+    const { data: existingTranscription, error: checkError } = await adminClient
+      .from('transcriptions')
+      .select('clinician_id')
+      .eq('id', transcriptionId)
+      .single()
+
+    if (checkError || !existingTranscription) {
+      return c.json({ error: 'Transcription not found' }, 404)
+    }
+
+    // SECURITY: Verify ownership
+    if (existingTranscription.clinician_id !== user.id) {
+      console.error(`[PUT /clinician/transcriptions/:id] SECURITY: User ${user.id} attempted to update transcription ${transcriptionId} owned by ${existingTranscription.clinician_id}`)
+      return c.json({ error: 'Unauthorized: Cannot update transcription owned by another clinician' }, 403)
+    }
+
+    // OPTIMIZATION: Build update object (only include fields that are provided)
+    // SECURITY: Ensure at least one field is being updated
+    if (analysis === undefined && clinical_notes === undefined) {
+      return c.json({ error: 'At least one field (analysis or clinical_notes) must be provided for update' }, 400)
+    }
+
+    const updateData: Record<string, any> = {
+      updated_at: new Date().toISOString()
+    }
+    
+    if (analysis !== undefined) {
+      updateData.analysis = analysis
+    }
+    if (clinical_notes !== undefined) {
+      updateData.clinical_notes = sanitizedClinicalNotes
+    }
+
+    // Update transcription
+    const { data: updatedTranscription, error: updateError } = await adminClient
+      .from('transcriptions')
+      .update(updateData)
+      .eq('id', transcriptionId)
+      .eq('clinician_id', user.id) // SECURITY: Double-check ownership in update query
+      .select()
+      .single()
+
+    if (updateError) {
+      console.error('[PUT /clinician/transcriptions/:id] Error:', updateError)
+      return c.json({ error: 'Failed to update transcription', details: updateError.message }, 500)
+    }
+
+    return c.json({
+      transcription: updatedTranscription,
+      message: 'Transcription updated successfully'
+    })
+  } catch (error: any) {
+    console.error('[PUT /clinician/transcriptions/:id] Error:', error)
+    return c.json({ 
+      error: 'Failed to update transcription', 
       details: error.message || 'Unknown error' 
     }, 500)
   }
