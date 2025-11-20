@@ -373,14 +373,6 @@ auth.post('/login', async (c) => {
     }
 
     // Set secure cookies
-    const userAgent = c.req.header('user-agent') || 'unknown'
-    const isProduction = process.env.NODE_ENV === 'production'
-    const sameSite = getCookieSameSite(userAgent)
-    const secure = isProduction
-    
-    console.log(`[LOGIN] Setting cookies - UserAgent: ${userAgent.substring(0, 50)}...`)
-    console.log(`[LOGIN] Cookie settings - SameSite: ${sameSite}, Secure: ${secure}, Production: ${isProduction}`)
-    
     setSecureCookies(
       c,
       authData.session.access_token,
@@ -388,15 +380,24 @@ auth.post('/login', async (c) => {
       authData.session.expires_at || 0,
       userData.id
     )
+
+
+    // Derive full_name if not set (backward compatibility)
+    const fullName = userData.full_name || 
+                     (userData.first_name && userData.last_name 
+                       ? `${userData.first_name} ${userData.last_name}` 
+                       : userData.email?.split('@')[0] || 'User')
+
+    // Check if this is a mobile device - return token as fallback for mobile Safari
+    const userAgent = c.req.header('user-agent') || ''
+    const isMobileDevice = /Mobile|Android|iPhone|iPad|iPod/i.test(userAgent)
     
-    // Log cookie headers being set
-    const cookieHeaders = c.res.headers.get('Set-Cookie')
-    console.log(`[LOGIN] Set-Cookie headers: ${cookieHeaders ? cookieHeaders.substring(0, 200) : 'NONE'}`)
-
-
+    console.log(`[LOGIN] Setting cookies for user: ${userData.email}`)
+    console.log(`[LOGIN] UserAgent: ${userAgent.substring(0, 50)}...`)
+    console.log(`[LOGIN] IsMobile: ${isMobileDevice}`)
+    
     // Record login log (non-blocking - don't fail login if this fails)
     try {
-      const userAgent = c.req.header('user-agent') || 'unknown'
       await adminClient
         .from('login_logs')
         .insert([{
@@ -410,14 +411,10 @@ auth.post('/login', async (c) => {
       // Log error but don't fail login
       console.error('[POST /login] Failed to record login log:', logError)
     }
-
-    // Derive full_name if not set (backward compatibility)
-    const fullName = userData.full_name || 
-                     (userData.first_name && userData.last_name 
-                       ? `${userData.first_name} ${userData.last_name}` 
-                       : userData.email?.split('@')[0] || 'User')
-
-    return c.json({
+    
+    // For mobile devices, also return token in response as fallback
+    // Mobile Safari often blocks cross-domain cookies, so we need this fallback
+    const response: any = {
       message: 'Login successful',
       user: {
         id: userData.id,
@@ -428,9 +425,16 @@ auth.post('/login', async (c) => {
         full_name: fullName,
         phone: null, // Phone is stored in team_members table, not users table
       },
-      // Cookies are set automatically - no need to return tokens
-      // Tokens are stored securely in HttpOnly cookies
-    })
+    }
+    
+    // Return token for mobile devices as fallback (Safari blocks cookies)
+    if (isMobileDevice) {
+      response.token = authData.session.access_token
+      response.refresh_token = authData.session.refresh_token
+      console.log(`[LOGIN] Mobile device detected - returning token as fallback for ${userData.email}`)
+    }
+    
+    return c.json(response)
   } catch (error: any) {
     console.error('Login error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
