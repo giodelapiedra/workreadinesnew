@@ -41,32 +41,37 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
   
   
   // Set access token cookie with proper expiration
+  // CRITICAL: Do NOT set domain attribute for cross-domain cookies
+  // Setting domain would restrict the cookie to that domain only
   setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, accessToken, {
     httpOnly: true,
-    secure: secure, // Required when SameSite=None
+    secure: secure, // Required when SameSite=None (mobile cross-domain)
     sameSite: sameSite, // 'None' for cross-origin (production), 'Lax' for dev
     maxAge: maxAge, // 1 hour default, up to 7 days based on token expiration
     path: '/',
+    // Explicitly do NOT set domain - allows cross-domain cookie sharing
   })
 
   // Set refresh token cookie - longer expiration (30 days)
   const refreshTokenMaxAge = 3600 * 24 * 30 // 30 days
   setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, refreshToken, {
     httpOnly: true,
-    secure: secure,
+    secure: secure, // Required when SameSite=None (mobile cross-domain)
     sameSite: sameSite,
     maxAge: refreshTokenMaxAge,
     path: '/',
+    // Explicitly do NOT set domain - allows cross-domain cookie sharing
   })
   
   // Set user_id cookie to track session ownership
   // This helps detect when a different user logs in
   setCookie(c, COOKIE_NAMES.USER_ID, userId, {
     httpOnly: true,
-    secure: secure,
+    secure: secure, // Required when SameSite=None (mobile cross-domain)
     sameSite: sameSite,
     maxAge: refreshTokenMaxAge, // Same as refresh token
     path: '/',
+    // Explicitly do NOT set domain - allows cross-domain cookie sharing
   })
   
 }

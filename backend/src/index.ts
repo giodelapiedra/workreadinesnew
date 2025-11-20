@@ -52,10 +52,23 @@ app.use('/*', cors({
     // Not allowed
     return undefined
   },
-  credentials: true,
+  credentials: true, // CRITICAL: Must be true for cookies to work cross-domain
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'Accept', 'X-Requested-With'],
-  exposeHeaders: ['Content-Length', 'X-Request-Id'],
+  allowHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'Cache-Control', 
+    'Pragma', 
+    'Expires', 
+    'Accept', 
+    'X-Requested-With',
+    'Cookie', // Allow Cookie header for mobile browsers
+  ],
+  exposeHeaders: [
+    'Content-Length', 
+    'X-Request-Id',
+    'Set-Cookie', // Expose Set-Cookie header for debugging
+  ],
   maxAge: 86400, // 24 hours
 }))
 
