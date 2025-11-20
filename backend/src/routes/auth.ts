@@ -388,15 +388,8 @@ auth.post('/login', async (c) => {
                        ? `${userData.first_name} ${userData.last_name}` 
                        : userData.email?.split('@')[0] || 'User')
 
-    // Check if this is a mobile device - return token as fallback for mobile Safari
-    const userAgent = c.req.header('user-agent') || ''
-    const isMobileDevice = /Mobile|Android|iPhone|iPad|iPod/i.test(userAgent)
-    
-    console.log(`[LOGIN] Setting cookies for user: ${userData.email}`)
-    console.log(`[LOGIN] UserAgent: ${userAgent.substring(0, 50)}...`)
-    console.log(`[LOGIN] IsMobile: ${isMobileDevice}`)
-    
     // Record login log (non-blocking - don't fail login if this fails)
+    const userAgent = c.req.header('user-agent') || 'unknown'
     try {
       await adminClient
         .from('login_logs')
@@ -412,9 +405,15 @@ auth.post('/login', async (c) => {
       console.error('[POST /login] Failed to record login log:', logError)
     }
     
-    // For mobile devices, also return token in response as fallback
-    // Mobile Safari often blocks cross-domain cookies, so we need this fallback
-    const response: any = {
+    // Log cookie setting for debugging
+    const isMobile = /Mobile|Android|iPhone|iPad|iPod/i.test(userAgent)
+    const isProduction = process.env.NODE_ENV === 'production'
+    const sameSite = getCookieSameSite(userAgent)
+    console.log(`[LOGIN] Cookies set for user: ${userData.email}`)
+    console.log(`[LOGIN] UserAgent: ${userAgent.substring(0, 50)}...`)
+    console.log(`[LOGIN] IsMobile: ${isMobile}, IsProduction: ${isProduction}, SameSite: ${sameSite}`)
+    
+    return c.json({
       message: 'Login successful',
       user: {
         id: userData.id,
@@ -425,16 +424,9 @@ auth.post('/login', async (c) => {
         full_name: fullName,
         phone: null, // Phone is stored in team_members table, not users table
       },
-    }
-    
-    // Return token for mobile devices as fallback (Safari blocks cookies)
-    if (isMobileDevice) {
-      response.token = authData.session.access_token
-      response.refresh_token = authData.session.refresh_token
-      console.log(`[LOGIN] Mobile device detected - returning token as fallback for ${userData.email}`)
-    }
-    
-    return c.json(response)
+      // Cookies are set automatically - no need to return tokens
+      // Tokens are stored securely in HttpOnly cookies
+    })
   } catch (error: any) {
     console.error('Login error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
