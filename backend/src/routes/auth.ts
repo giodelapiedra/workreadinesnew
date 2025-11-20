@@ -380,6 +380,13 @@ auth.post('/login', async (c) => {
       authData.session.expires_at || 0,
       userData.id
     )
+    
+    // Log Set-Cookie headers for debugging
+    const setCookieHeaders = c.res.headers.get('Set-Cookie')
+    console.log(`[LOGIN] Set-Cookie headers: ${setCookieHeaders ? 'PRESENT' : 'MISSING'}`)
+    if (setCookieHeaders) {
+      console.log(`[LOGIN] Set-Cookie value: ${setCookieHeaders.substring(0, 100)}...`)
+    }
 
 
     // Derive full_name if not set (backward compatibility)
