@@ -26,7 +26,8 @@ const productionOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.tri
 const developmentOrigins = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000']
 
 // Vercel preview URLs pattern - allow all Vercel preview and production URLs
-const vercelPattern = /^https:\/\/.*\.vercel\.app$/
+// Match both *.vercel.app and vercel.app domains
+const vercelPattern = /^https:\/\/(.*\.)?vercel\.app$/
 
 // In production, use configured origins + localhost + Vercel URLs
 // In development, use localhost origins
@@ -50,8 +51,8 @@ app.use('/*', cors({
       return origin
     }
     
-    // In production, also allow Vercel URLs (preview and production)
-    if (process.env.NODE_ENV === 'production' && vercelPattern.test(origin)) {
+    // Allow Vercel URLs (preview and production) in all environments
+    if (vercelPattern.test(origin)) {
       console.log(`[CORS] Origin allowed (Vercel pattern): ${origin}`)
       return origin
     }
