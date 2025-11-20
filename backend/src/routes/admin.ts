@@ -3,8 +3,20 @@ import bcrypt from 'bcrypt'
 import { authMiddleware, requireRole } from '../middleware/auth.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { supabase } from '../lib/supabase.js'
+import { getTodayDateString, getFirstDayOfMonthString, dateToDateString } from '../utils/dateUtils.js'
 
 const admin = new Hono()
+
+// Medical incident types that require clinician assignment
+const MEDICAL_INCIDENT_TYPES = ['accident', 'injury', 'medical_leave', 'other'] as const
+
+// Helper function to format clinician full name (reusable across endpoints)
+const formatClinicianName = (clinician: any): string => {
+  return clinician.full_name || 
+         (clinician.first_name && clinician.last_name 
+           ? `${clinician.first_name} ${clinician.last_name}`
+           : clinician.email)
+}
 
 // Get system-wide statistics (admin only)
 admin.get('/stats', authMiddleware, requireRole(['admin']), async (c) => {
@@ -16,10 +28,10 @@ admin.get('/stats', authMiddleware, requireRole(['admin']), async (c) => {
     const endDateParam = c.req.query('endDate')
     
     // Default to last 7 days if no dates provided
-    const todayDateStr = new Date().toISOString().split('T')[0]
+    const todayDateStr = getTodayDateString()
     const defaultStartDate = new Date()
     defaultStartDate.setDate(defaultStartDate.getDate() - 7)
-    const defaultStart = defaultStartDate.toISOString().split('T')[0]
+    const defaultStart = dateToDateString(defaultStartDate)
     
     const startDate = startDateParam || defaultStart
     const endDate = endDateParam || todayDateStr
@@ -67,7 +79,7 @@ admin.get('/stats', authMiddleware, requireRole(['admin']), async (c) => {
       .select('id')
 
     // Get check-ins statistics - optimized single query
-    const todayStr = new Date().toISOString().split('T')[0]
+    const todayStr = getTodayDateString()
     const thisWeek = new Date()
     thisWeek.setDate(thisWeek.getDate() - 7)
     const thisMonth = new Date()
@@ -110,7 +122,7 @@ admin.get('/stats', authMiddleware, requireRole(['admin']), async (c) => {
     for (let i = 0; i <= actualDays; i++) {
       const date = new Date(start)
       date.setDate(date.getDate() + i)
-      const dateStr = date.toISOString().split('T')[0]
+      const dateStr = dateToDateString(date)
       
       // Skip if beyond end date
       if (dateStr > endDate) break
@@ -891,28 +903,31 @@ admin.get('/clinicians', authMiddleware, requireRole(['admin']), async (c) => {
     }
 
     const clinicianIds = clinicians.map((c: any) => c.id)
-    const incidentTypes = ['accident', 'injury', 'medical_leave', 'other']
 
     // OPTIMIZATION: Fetch all data in parallel
+    // Note: For admin view, we show all cases/appointments/rehab plans assigned to clinicians
+    // Match the same query logic as the detail endpoint for consistency
     const [casesResult, appointmentsResult, rehabPlansResult] = await Promise.all([
       clinicianIds.length > 0
         ? adminClient
             .from('worker_exceptions')
             .select('id, clinician_id, is_active, start_date, end_date')
-            .in('exception_type', incidentTypes)
-            .eq('assigned_to_whs', true)
+            .in('exception_type', MEDICAL_INCIDENT_TYPES)
+            .not('clinician_id', 'is', null)
             .in('clinician_id', clinicianIds)
         : Promise.resolve({ data: [], error: null }),
       clinicianIds.length > 0
         ? adminClient
             .from('appointments')
             .select('id, clinician_id, status, appointment_date')
+            .not('clinician_id', 'is', null)
             .in('clinician_id', clinicianIds)
         : Promise.resolve({ data: [], error: null }),
       clinicianIds.length > 0
         ? adminClient
             .from('rehabilitation_plans')
             .select('id, clinician_id, status')
+            .not('clinician_id', 'is', null)
             .in('clinician_id', clinicianIds)
         : Promise.resolve({ data: [], error: null }),
     ])
@@ -953,11 +968,12 @@ admin.get('/clinicians', authMiddleware, requireRole(['admin']), async (c) => {
       })
     })
 
-    // Count cases
+    // Count cases, appointments, and rehab plans
     const today = new Date()
     today.setHours(0, 0, 0, 0)
+    
     ;(allCases || []).forEach((caseItem: any) => {
-      if (!caseItem.clinician_id) return
+      if (!caseItem?.clinician_id) return
       const stats = clinicianStats.get(caseItem.clinician_id)
       if (stats) {
         stats.totalCases++
@@ -970,9 +986,8 @@ admin.get('/clinicians', authMiddleware, requireRole(['admin']), async (c) => {
       }
     })
 
-    // Count appointments
     ;(allAppointments || []).forEach((appointment: any) => {
-      if (!appointment.clinician_id) return
+      if (!appointment?.clinician_id) return
       const stats = clinicianStats.get(appointment.clinician_id)
       if (stats) {
         stats.totalAppointments++
@@ -983,9 +998,8 @@ admin.get('/clinicians', authMiddleware, requireRole(['admin']), async (c) => {
       }
     })
 
-    // Count rehabilitation plans
     ;(allRehabPlans || []).forEach((plan: any) => {
-      if (!plan.clinician_id) return
+      if (!plan?.clinician_id) return
       const stats = clinicianStats.get(plan.clinician_id)
       if (stats) {
         stats.totalRehabPlans++
@@ -1011,10 +1025,7 @@ admin.get('/clinicians', authMiddleware, requireRole(['admin']), async (c) => {
         email: clinician.email,
         first_name: clinician.first_name,
         last_name: clinician.last_name,
-        full_name: clinician.full_name || 
-                   (clinician.first_name && clinician.last_name 
-                     ? `${clinician.first_name} ${clinician.last_name}`
-                     : clinician.email),
+        full_name: formatClinicianName(clinician),
         active_cases: stats.activeCases,
         total_cases: stats.totalCases,
         upcoming_appointments: stats.upcomingAppointments,
@@ -1049,8 +1060,6 @@ admin.get('/clinicians/:id', authMiddleware, requireRole(['admin']), async (c) =
       return c.json({ error: 'Clinician not found' }, 404)
     }
 
-    const incidentTypes = ['accident', 'injury', 'medical_leave', 'other']
-
     // OPTIMIZATION: Fetch all data in parallel
     const [casesResult, appointmentsResult, rehabPlansResult] = await Promise.all([
       adminClient
@@ -1076,8 +1085,8 @@ admin.get('/clinicians/:id', authMiddleware, requireRole(['admin']), async (c) =
             site_location
           )
         `)
-        .in('exception_type', incidentTypes)
-        .eq('assigned_to_whs', true)
+        .in('exception_type', MEDICAL_INCIDENT_TYPES)
+        .not('clinician_id', 'is', null)
         .eq('clinician_id', clinicianId)
         .order('created_at', { ascending: false }),
       adminClient
@@ -1155,10 +1164,7 @@ admin.get('/clinicians/:id', authMiddleware, requireRole(['admin']), async (c) =
         email: clinician.email,
         first_name: clinician.first_name,
         last_name: clinician.last_name,
-        full_name: clinician.full_name || 
-                   (clinician.first_name && clinician.last_name 
-                     ? `${clinician.first_name} ${clinician.last_name}`
-                     : clinician.email),
+        full_name: formatClinicianName(clinician),
       },
       cases: cases || [],
       appointments: appointments || [],
