@@ -8,16 +8,17 @@ import { sanitizeInput, isValidEmail, isValidName, isValidPassword } from '../mi
 import { getAdminClient } from '../utils/adminClient.js'
 import { ensureUserRecordExists } from '../utils/userUtils.js'
 import { generateUniqueQuickLoginCode, isValidQuickLoginCode, generateUniquePinCode } from '../utils/quickLoginCode.js'
+import { cascadeBusinessInfoUpdate } from '../utils/executiveHelpers.js'
+import { getCookieSameSite } from '../utils/cookieHelpers.js'
 
-// Helper function to set secure cookies
+/**
+ * Set secure cookies for authentication
+ * Uses mobile-friendly cookie settings (Lax for mobile, None for desktop production)
+ */
 function setSecureCookies(c: any, accessToken: string, refreshToken: string, expiresAt: number, userId: string) {
   const isProduction = process.env.NODE_ENV === 'production'
-  
-  // For cross-origin requests (Vercel frontend → Render backend), use 'None'
-  // For same-origin or localhost, use 'Lax'
-  // 'None' requires 'Secure: true' (HTTPS only)
-  // 'Strict' doesn't work for cross-origin requests
-  const sameSite = isProduction ? 'None' : 'Lax'
+  const userAgent = c.req.header('user-agent')
+  const sameSite = getCookieSameSite(userAgent)
   const secure = isProduction // Must be true when SameSite=None
   
   // expiresAt is in seconds since epoch (Unix timestamp)
@@ -68,38 +69,41 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
   
 }
 
-// Helper function to clear cookies securely
+/**
+ * Clear authentication cookies
+ */
 function clearCookies(c: any) {
   const isProduction = process.env.NODE_ENV === 'production'
-  const sameSite = isProduction ? 'None' : 'Lax' // Match setSecureCookies
-  const secure = isProduction // Must be true when SameSite=None
+  const userAgent = c.req.header('user-agent')
+  const sameSite = getCookieSameSite(userAgent)
+  const secure = isProduction
   
   // Clear access token cookie - set maxAge to 0 and empty value
   // Setting maxAge to 0 tells the browser to delete the cookie immediately
   setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, '', {
-    httpOnly: true,
-    secure: secure,
-    sameSite: sameSite,
+    httpOnly: true, // Prevents JavaScript access (XSS protection)
+    secure: secure, // HTTPS only in production
+    sameSite: sameSite, // CSRF protection
     maxAge: 0, // Expires immediately - browser will delete the cookie
-    path: '/',
+    path: '/', // Clear for entire application
   })
   
   // Clear refresh token cookie - set maxAge to 0 and empty value
   setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', {
-    httpOnly: true,
-    secure: secure,
-    sameSite: sameSite,
+    httpOnly: true, // Prevents JavaScript access (XSS protection)
+    secure: secure, // HTTPS only in production
+    sameSite: sameSite, // CSRF protection
     maxAge: 0, // Expires immediately - browser will delete the cookie
-    path: '/',
+    path: '/', // Clear for entire application
   })
   
   // Clear user_id cookie
   setCookie(c, COOKIE_NAMES.USER_ID, '', {
-    httpOnly: true,
-    secure: secure,
-    sameSite: sameSite,
+    httpOnly: true, // Prevents JavaScript access (XSS protection)
+    secure: secure, // HTTPS only in production
+    sameSite: sameSite, // CSRF protection
     maxAge: 0, // Expires immediately - browser will delete the cookie
-    path: '/',
+    path: '/', // Clear for entire application
   })
   
 }
@@ -618,35 +622,8 @@ auth.post('/logout', async (c) => {
     
     // SECURITY: Clear all cookies (access token, refresh token, user_id)
     // This removes the session from the browser
+    // clearCookies() already handles all cookie clearing with proper security settings
     clearCookies(c)
-    
-    // SECURITY: Also clear any potential Authorization header by setting empty cookie
-    // This ensures no residual authentication data remains
-    const isProduction = process.env.NODE_ENV === 'production'
-    const sameSite = isProduction ? 'None' : 'Lax' // Match setSecureCookies
-    const secure = isProduction // Must be true when SameSite=None
-    setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, '', {
-      httpOnly: true,
-      secure: secure,
-      sameSite: sameSite,
-      maxAge: 0,
-      path: '/',
-    })
-    setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', {
-      httpOnly: true,
-      secure: secure,
-      sameSite: sameSite,
-      maxAge: 0,
-      path: '/',
-    })
-    setCookie(c, COOKIE_NAMES.USER_ID, '', {
-      httpOnly: true,
-      secure: secure,
-      sameSite: sameSite,
-      maxAge: 0,
-      path: '/',
-    })
-    
 
     return c.json({ 
       message: 'Logged out successfully',
@@ -923,7 +900,6 @@ auth.get('/me', async (c) => {
             ...autoCreatedUser,
             business_name: null,
             business_registration_number: null,
-            quick_login_code: null,
           }
         }
       } else {
@@ -1190,31 +1166,31 @@ auth.patch('/profile', authMiddleware, async (c) => {
       }
     }
 
-    // Handle business info updates (no password required)
+    // Handle business info updates - ONLY executives can edit business info
     if (business_name !== undefined || business_registration_number !== undefined) {
-      if (currentUserData.role !== 'worker') {
-        if (business_name !== undefined) {
-          updates.business_name = typeof business_name === 'string' ? business_name.trim() || null : null
-        }
-        if (business_registration_number !== undefined) {
-          updates.business_registration_number = typeof business_registration_number === 'string' ? business_registration_number.trim() || null : null
-        }
-      } else {
-        // Workers can only update registration number
-        if (business_registration_number !== undefined) {
-          updates.business_registration_number = typeof business_registration_number === 'string' ? business_registration_number.trim() || null : null
-        }
+      // Only executives can update business info
+      if (currentUserData.role !== 'executive') {
+        return c.json({ 
+          error: 'Only executives can edit business information. Business information is automatically inherited from your executive.' 
+        }, 403)
       }
 
-      // Supervisor validation: both fields required
-      if (currentUserData.role === 'supervisor') {
-        const finalBusinessName = updates.business_name !== undefined ? updates.business_name : currentUserData.business_name
-        const finalRegNumber = updates.business_registration_number !== undefined ? updates.business_registration_number : currentUserData.business_registration_number
+      // Executive can update business info
+      const newBusinessName = business_name !== undefined 
+        ? (typeof business_name === 'string' ? business_name.trim() || null : null)
+        : currentUserData.business_name
+      
+      const newBusinessRegNumber = business_registration_number !== undefined
+        ? (typeof business_registration_number === 'string' ? business_registration_number.trim() || null : null)
+        : currentUserData.business_registration_number
 
-        if (!finalBusinessName || !finalRegNumber) {
-          return c.json({ error: 'Business Name and Business Registration Number are required for supervisors' }, 400)
-        }
+      // Executive validation: both fields required
+      if (!newBusinessName || !newBusinessRegNumber) {
+        return c.json({ error: 'Business Name and Business Registration Number are required for executives' }, 400)
       }
+
+      updates.business_name = newBusinessName
+      updates.business_registration_number = newBusinessRegNumber
     }
 
     if (Object.keys(updates).length === 0) {
@@ -1235,12 +1211,100 @@ auth.patch('/profile', authMiddleware, async (c) => {
       return c.json({ error: 'Failed to update profile', details: updateError.message }, 500)
     }
 
+    // If executive updated business info, cascade update to all users under them
+    if (currentUserData.role === 'executive' && 
+        (business_name !== undefined || business_registration_number !== undefined)) {
+      
+      const oldBusinessName = currentUserData.business_name || ''
+      const oldBusinessRegNumber = currentUserData.business_registration_number || ''
+      const newBusinessName = updatedUser.business_name || ''
+      const newBusinessRegNumber = updatedUser.business_registration_number || ''
+
+      // Use helper function to cascade update (optimized and centralized)
+      const cascadeResult = await cascadeBusinessInfoUpdate(
+        oldBusinessName,
+        oldBusinessRegNumber,
+        newBusinessName,
+        newBusinessRegNumber
+      )
+
+      if (!cascadeResult.success) {
+        console.error('Failed to cascade business info update:', cascadeResult.error)
+        // Don't fail the request, but log the error
+      } else {
+        console.log(`Cascaded business info update to all users under executive ${user.id}`)
+      }
+    }
+
     return c.json({
       message: 'Profile updated successfully',
       user: updatedUser,
     })
   } catch (error: any) {
     console.error('Update profile error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Verify password (authenticated users only)
+auth.post('/verify-password', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const { password } = await c.req.json()
+
+    if (!password || typeof password !== 'string' || password.trim() === '') {
+      return c.json({ error: 'Password is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get user's email and password hash
+    const { data: userData, error: userError } = await adminClient
+      .from('users')
+      .select('email, password_hash')
+      .eq('id', user.id)
+      .single()
+
+    if (userError || !userData) {
+      console.error('[POST /auth/verify-password] Error fetching user:', userError)
+      return c.json({ error: 'Failed to verify identity' }, 500)
+    }
+
+    // Verify password
+    let passwordValid = false
+
+    if (userData.password_hash) {
+      // Verify using stored password hash
+      passwordValid = await bcrypt.compare(password, userData.password_hash)
+    } else {
+      // If no password_hash, verify using Supabase Auth
+      try {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: userData.email,
+          password: password,
+        })
+        passwordValid = !signInError
+        // Sign out immediately to prevent session creation
+        if (passwordValid) {
+          await supabase.auth.signOut()
+        }
+      } catch (authError: any) {
+        console.error('[POST /auth/verify-password] Password verification error:', authError)
+        passwordValid = false
+      }
+    }
+
+    if (!passwordValid) {
+      return c.json({ error: 'Invalid password' }, 401)
+    }
+
+    return c.json({ verified: true })
+  } catch (error: any) {
+    console.error('[POST /auth/verify-password] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
