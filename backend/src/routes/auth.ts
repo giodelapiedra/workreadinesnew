@@ -9,19 +9,19 @@ import { getAdminClient } from '../utils/adminClient.js'
 import { ensureUserRecordExists } from '../utils/userUtils.js'
 import { generateUniqueQuickLoginCode, isValidQuickLoginCode, generateUniquePinCode } from '../utils/quickLoginCode.js'
 import { cascadeBusinessInfoUpdate } from '../utils/executiveHelpers.js'
-import { getCookieSameSite, shouldUsePartitioned } from '../utils/cookieHelpers.js'
+import { getCookieSameSite } from '../utils/cookieHelpers.js'
 
 /**
- * Set secure cookies for authentication with Partitioned support
- * Uses mobile-friendly cookie settings (Lax for mobile, None for desktop production)
- * Adds Partitioned attribute when SameSite=None to prevent browser blocking
+ * Set secure cookies for authentication
+ * Production: SameSite=None + Secure=true (required for mobile cross-domain)
+ * Development: SameSite=Lax (same-domain)
  */
 function setSecureCookies(c: any, accessToken: string, refreshToken: string, expiresAt: number, userId: string) {
   const isProduction = process.env.NODE_ENV === 'production'
   const userAgent = c.req.header('user-agent')
   const sameSite = getCookieSameSite(userAgent)
-  const secure = isProduction // Must be true when SameSite=None
-  const usePartitioned = shouldUsePartitioned() // Add Partitioned when SameSite=None
+  // MUST be true when SameSite=None (required for mobile cross-domain cookies)
+  const secure = isProduction
   
   // expiresAt is in seconds since epoch (Unix timestamp)
   // Calculate maxAge properly
@@ -39,31 +39,9 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
     maxAge = 3600
   }
   
-  // Helper to set cookie with optional Partitioned attribute
-  const setCookieWithPartitioned = (name: string, value: string, options: any) => {
-    if (usePartitioned && sameSite === 'None') {
-      // Manually construct Set-Cookie header with Partitioned attribute
-      // This is required for SameSite=None cookies in modern browsers
-      const cookieParts = [
-        `${name}=${value}`,
-        `Path=${options.path || '/'}`,
-        `Max-Age=${options.maxAge || 0}`,
-        `HttpOnly`,
-        `Secure`,
-        `SameSite=None`,
-        `Partitioned` // Required for cross-site cookies in modern browsers
-      ]
-      
-      // Append Set-Cookie header (HTTP allows multiple Set-Cookie headers)
-      c.res.headers.append('Set-Cookie', cookieParts.join('; '))
-    } else {
-      // Use Hono's setCookie for normal cookies (dev or when Partitioned not needed)
-      setCookie(c, name, value, options)
-    }
-  }
   
   // Set access token cookie with proper expiration
-  setCookieWithPartitioned(COOKIE_NAMES.ACCESS_TOKEN, accessToken, {
+  setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, accessToken, {
     httpOnly: true,
     secure: secure, // Required when SameSite=None
     sameSite: sameSite, // 'None' for cross-origin (production), 'Lax' for dev
@@ -73,7 +51,7 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
 
   // Set refresh token cookie - longer expiration (30 days)
   const refreshTokenMaxAge = 3600 * 24 * 30 // 30 days
-  setCookieWithPartitioned(COOKIE_NAMES.REFRESH_TOKEN, refreshToken, {
+  setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, refreshToken, {
     httpOnly: true,
     secure: secure,
     sameSite: sameSite,
@@ -83,7 +61,7 @@ function setSecureCookies(c: any, accessToken: string, refreshToken: string, exp
   
   // Set user_id cookie to track session ownership
   // This helps detect when a different user logs in
-  setCookieWithPartitioned(COOKIE_NAMES.USER_ID, userId, {
+  setCookie(c, COOKIE_NAMES.USER_ID, userId, {
     httpOnly: true,
     secure: secure,
     sameSite: sameSite,
@@ -101,45 +79,34 @@ function clearCookies(c: any) {
   const userAgent = c.req.header('user-agent')
   const sameSite = getCookieSameSite(userAgent)
   const secure = isProduction
-  const usePartitioned = shouldUsePartitioned()
-  
-  // Helper to clear cookie with optional Partitioned attribute
-  const clearCookieWithPartitioned = (name: string) => {
-    if (usePartitioned && sameSite === 'None') {
-      // Manually construct Set-Cookie header to clear with Partitioned attribute
-      const cookieParts = [
-        `${name}=`,
-        `Path=/`,
-        `Max-Age=0`, // Expires immediately
-        `HttpOnly`,
-        `Secure`,
-        `SameSite=None`,
-        `Partitioned` // Must match the attribute used when setting
-      ]
-      
-      // Append Set-Cookie header (HTTP allows multiple Set-Cookie headers)
-      c.res.headers.append('Set-Cookie', cookieParts.join('; '))
-    } else {
-      // Use Hono's setCookie for normal cookies
-      setCookie(c, name, '', {
-        httpOnly: true,
-        secure: secure,
-        sameSite: sameSite,
-        maxAge: 0, // Expires immediately
-        path: '/',
-      })
-    }
-  }
   
   // Clear access token cookie - set maxAge to 0 and empty value
   // Setting maxAge to 0 tells the browser to delete the cookie immediately
-  clearCookieWithPartitioned(COOKIE_NAMES.ACCESS_TOKEN)
+  setCookie(c, COOKIE_NAMES.ACCESS_TOKEN, '', {
+    httpOnly: true, // Prevents JavaScript access (XSS protection)
+    secure: secure, // HTTPS only in production
+    sameSite: sameSite, // CSRF protection
+    maxAge: 0, // Expires immediately - browser will delete the cookie
+    path: '/', // Clear for entire application
+  })
   
   // Clear refresh token cookie - set maxAge to 0 and empty value
-  clearCookieWithPartitioned(COOKIE_NAMES.REFRESH_TOKEN)
+  setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', {
+    httpOnly: true, // Prevents JavaScript access (XSS protection)
+    secure: secure, // HTTPS only in production
+    sameSite: sameSite, // CSRF protection
+    maxAge: 0, // Expires immediately - browser will delete the cookie
+    path: '/', // Clear for entire application
+  })
   
   // Clear user_id cookie
-  clearCookieWithPartitioned(COOKIE_NAMES.USER_ID)
+  setCookie(c, COOKIE_NAMES.USER_ID, '', {
+    httpOnly: true, // Prevents JavaScript access (XSS protection)
+    secure: secure, // HTTPS only in production
+    sameSite: sameSite, // CSRF protection
+    maxAge: 0, // Expires immediately - browser will delete the cookie
+    path: '/', // Clear for entire application
+  })
   
 }
 
