@@ -84,14 +84,14 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
       })
       
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
+        const errorData = await response.json().catch(() => ({})) as any
         error = {
-          message: errorData.message || errorData.error_description || 'Token validation failed',
+          message: errorData?.message || errorData?.error_description || 'Token validation failed',
           status: response.status,
         }
         console.log(`[AUTH] Token validation failed: ${error.message} (status: ${error.status})`)
       } else {
-        const userData = await response.json()
+        const userData = await response.json() as any
         user = userData || null
         if (user) {
           console.log(`[AUTH] Token validated successfully for user: ${user.email || user.id}`)
