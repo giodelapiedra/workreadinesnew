@@ -314,10 +314,38 @@ auth.post('/login', async (c) => {
 
 
     // Try Supabase Auth first (simplest approach)
-    let { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    })
+    // Wrap in try-catch to handle network errors gracefully
+    let authData = null
+    let authError = null
+    
+    try {
+      const result = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      })
+      authData = result.data
+      authError = result.error
+    } catch (networkError: any) {
+      // Handle network errors from Supabase
+      const isNetworkError = 
+        networkError.code === 'ECONNRESET' ||
+        networkError.code === 'ETIMEDOUT' ||
+        networkError.message?.includes('fetch failed') ||
+        networkError.message?.includes('network') ||
+        networkError.cause?.code === 'ECONNRESET'
+      
+      if (isNetworkError) {
+        console.error('[POST /login] Network error connecting to Supabase:', networkError.message || networkError.code)
+        return c.json({ 
+          error: 'Service temporarily unavailable', 
+          message: 'Unable to connect to authentication service. Please try again in a moment.',
+          retry: true
+        }, 503)
+      }
+      
+      // Re-throw if it's not a network error
+      throw networkError
+    }
 
     // If Supabase Auth fails, check if user has password_hash (might be out of sync)
     if (authError || !authData?.session) {
