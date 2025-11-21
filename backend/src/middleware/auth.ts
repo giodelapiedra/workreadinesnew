@@ -26,14 +26,25 @@ function getToken(c: Context): string | null {
   // Try to get from secure cookie first (more secure)
   const cookieToken = getCookie(c, COOKIE_NAMES.ACCESS_TOKEN)
   if (cookieToken) {
+    console.log('[AUTH] Cookie token found: true')
     return cookieToken
   }
+  console.log('[AUTH] Cookie token found: false')
 
   // Fallback to Authorization header
   const authHeader = c.req.header('Authorization')
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.substring(7)
+  console.log(`[AUTH] Authorization header: ${authHeader ? 'PRESENT' : 'MISSING'}`)
+  if (authHeader) {
+    console.log(`[AUTH] Authorization header value: ${authHeader.substring(0, 20)}...`)
   }
+  
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7)
+    console.log(`[AUTH] Auth header found: true, token length: ${token.length}`)
+    return token
+  }
+  
+  console.log('[AUTH] Auth header found: false')
 
   return null
 }
