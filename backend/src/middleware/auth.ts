@@ -58,13 +58,45 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
     }
 
     // Verify token with Supabase with retry logic
+    // IMPORTANT: Use Supabase Auth API directly for token validation
+    // The service role client's getUser() method doesn't work well with user tokens
     let user = null
     let error = null
     
     try {
-      const result = await supabase.auth.getUser(token)
-      user = result.data?.user || null
-      error = result.error || null
+      const supabaseUrl = process.env.SUPABASE_URL || ''
+      const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || ''
+      
+      if (!supabaseUrl || !supabaseAnonKey) {
+        console.error('[AUTH] Missing Supabase URL or Anon Key for token validation')
+        return c.json({ error: 'Server configuration error' }, 500)
+      }
+      
+      // Call Supabase Auth API directly to validate token
+      // This is more reliable than using the client's getUser() method
+      const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'apikey': supabaseAnonKey,
+          'Content-Type': 'application/json',
+        },
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        error = {
+          message: errorData.message || errorData.error_description || 'Token validation failed',
+          status: response.status,
+        }
+        console.log(`[AUTH] Token validation failed: ${error.message} (status: ${error.status})`)
+      } else {
+        const userData = await response.json()
+        user = userData || null
+        if (user) {
+          console.log(`[AUTH] Token validated successfully for user: ${user.email || user.id}`)
+        }
+      }
     } catch (networkError: any) {
       // Handle network errors specifically
       const isNetworkError = 
