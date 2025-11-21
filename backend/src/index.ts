@@ -25,74 +25,44 @@ app.use('*', rateLimiter)
 const productionOrigins = process.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean) || []
 const developmentOrigins = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:3000']
 
-// Explicitly allow Vercel frontend URLs
-const vercelFrontendUrls = [
-  'https://new-development-physioward-green.vercel.app',
-  // Add other Vercel URLs here if needed
-]
-
-// Custom production frontend domains
-const customFrontendUrls = [
-  'https://www.giodelapiedra.dev',
-  'https://giodelapiedra.dev', // Allow both www and non-www
-]
-
 // Vercel preview URLs pattern - allow all Vercel preview and production URLs
-// Match both *.vercel.app and vercel.app domains
-const vercelPattern = /^https:\/\/(.*\.)?vercel\.app$/
+const vercelPattern = /^https:\/\/.*\.vercel\.app$/
+// Custom domain pattern - allow giodelapiedra.dev domain
+const customDomainPattern = /^https:\/\/(www\.)?giodelapiedra\.dev$/
 
-// In production, use configured origins + localhost + Vercel URLs + explicit Vercel frontend URLs + custom domains
-// In development, use localhost origins + explicit Vercel frontend URLs + custom domains (for testing)
+// In production, use configured origins + localhost + Vercel URLs + custom domain
+// In development, use localhost origins
 const allowedOrigins = process.env.NODE_ENV === 'production'
-  ? [...productionOrigins, ...developmentOrigins, ...vercelFrontendUrls, ...customFrontendUrls]
-  : [...developmentOrigins, ...vercelFrontendUrls, ...customFrontendUrls]
+  ? [...productionOrigins, ...developmentOrigins]
+  : developmentOrigins
 
 app.use('/*', cors({
   origin: (origin) => {
     // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) {
-      console.log('[CORS] No origin provided - allowing')
-      return origin
-    }
-    
-    console.log(`[CORS] Checking origin: ${origin}`)
+    if (!origin) return origin
     
     // Check if origin is in allowed list
     if (allowedOrigins.includes(origin)) {
-      console.log(`[CORS] Origin allowed (in list): ${origin}`)
       return origin
     }
     
-    // Allow Vercel URLs (preview and production) in all environments
-    if (vercelPattern.test(origin)) {
-      console.log(`[CORS] Origin allowed (Vercel pattern): ${origin}`)
+    // In production, also allow Vercel URLs (preview and production)
+    if (process.env.NODE_ENV === 'production' && vercelPattern.test(origin)) {
+      return origin
+    }
+    
+    // In production, also allow custom domain (giodelapiedra.dev)
+    if (process.env.NODE_ENV === 'production' && customDomainPattern.test(origin)) {
       return origin
     }
     
     // Not allowed
-    console.log(`[CORS] Origin NOT allowed: ${origin}`)
-    console.log(`[CORS] Allowed origins:`, allowedOrigins)
-    console.log(`[CORS] NODE_ENV:`, process.env.NODE_ENV)
-    console.log(`[CORS] Pattern test result:`, vercelPattern.test(origin))
     return undefined
   },
-  credentials: true, // CRITICAL: Must be true for cookies to work cross-domain
+  credentials: true,
   allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowHeaders: [
-    'Content-Type', 
-    'Authorization', 
-    'Cache-Control', 
-    'Pragma', 
-    'Expires', 
-    'Accept', 
-    'X-Requested-With',
-    'Cookie', // Allow Cookie header for mobile browsers
-  ],
-  exposeHeaders: [
-    'Content-Length', 
-    'X-Request-Id',
-    'Set-Cookie', // Expose Set-Cookie header for debugging
-  ],
+  allowHeaders: ['Content-Type', 'Authorization', 'Cache-Control', 'Pragma', 'Expires', 'Accept', 'X-Requested-With'],
+  exposeHeaders: ['Content-Length', 'X-Request-Id'],
   maxAge: 86400, // 24 hours
 }))
 
@@ -130,16 +100,6 @@ app.route('/api/admin', admin)
 
 // Executive routes
 app.route('/api/executive', executive)
-
-// Error handler - must be after all routes
-app.onError((err, c) => {
-  console.error('[Error Handler]', err)
-  // Always return CORS headers even on error
-  return c.json({ 
-    error: 'Internal server error', 
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined 
-  }, 500)
-})
 
 // Example API route
 app.get('/api', (c) => {
