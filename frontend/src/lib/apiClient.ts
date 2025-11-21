@@ -59,9 +59,39 @@ class ApiClient {
     url: string,
     config: RequestConfig
   ): Promise<RequestInit> {
-    const headers = new Headers(config.headers)
+    // Create headers object - handle both Headers and plain object
+    const headers = new Headers()
+    
+    // Copy existing headers from config
+    if (config.headers) {
+      if (config.headers instanceof Headers) {
+        // If it's already a Headers object, copy all entries
+        config.headers.forEach((value, key) => {
+          headers.set(key, value)
+        })
+      } else if (typeof config.headers === 'object') {
+        // If it's a plain object, set each header
+        Object.entries(config.headers).forEach(([key, value]) => {
+          if (value !== null && value !== undefined) {
+            headers.set(key, String(value))
+          }
+        })
+      }
+    }
 
-    // Don't use localStorage fallback - cookies should work
+    // MOBILE FALLBACK: If no Authorization header is set, try to get token from localStorage
+    // This is needed because Safari on iOS often blocks cross-domain cookies
+    if (!headers.has('Authorization')) {
+      const token = localStorage.getItem('auth_token')
+      if (token) {
+        headers.set('Authorization', `Bearer ${token}`)
+        console.log('[ApiClient] Using token from localStorage (mobile fallback)')
+      } else {
+        console.log('[ApiClient] No token in localStorage, no Authorization header will be sent')
+      }
+    } else {
+      console.log('[ApiClient] Authorization header already present in request')
+    }
 
     // CRITICAL: Explicitly preserve credentials for mobile cookie support
     return {

@@ -71,11 +71,21 @@ export function Login() {
       // MOBILE FIX: Store token in localStorage as fallback for Safari
       // Safari on iOS often blocks cross-domain cookies, so we need this fallback
       if ((result.data as any).token) {
-        localStorage.setItem('auth_token', (result.data as any).token)
-        if ((result.data as any).refresh_token) {
-          localStorage.setItem('auth_refresh_token', (result.data as any).refresh_token)
+        try {
+          localStorage.setItem('auth_token', (result.data as any).token)
+          if ((result.data as any).refresh_token) {
+            localStorage.setItem('auth_refresh_token', (result.data as any).refresh_token)
+          }
+          console.log('[Login] Token stored in localStorage for mobile fallback')
+          console.log('[Login] Token length:', (result.data as any).token.length)
+          // Verify it was stored
+          const stored = localStorage.getItem('auth_token')
+          console.log('[Login] Verification - token in localStorage:', stored ? `YES (length: ${stored.length})` : 'NO')
+        } catch (e) {
+          console.error('[Login] Failed to store token in localStorage:', e)
         }
-        console.log('[Login] Token stored in localStorage for mobile fallback')
+      } else {
+        console.log('[Login] No token in response - cookies only mode')
       }
       
       // Set user state immediately from login response (before cookies are processed)
