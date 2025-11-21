@@ -26,25 +26,14 @@ function getToken(c: Context): string | null {
   // Try to get from secure cookie first (more secure)
   const cookieToken = getCookie(c, COOKIE_NAMES.ACCESS_TOKEN)
   if (cookieToken) {
-    console.log('[AUTH] Cookie token found: true')
     return cookieToken
   }
-  console.log('[AUTH] Cookie token found: false')
 
   // Fallback to Authorization header
   const authHeader = c.req.header('Authorization')
-  console.log(`[AUTH] Authorization header: ${authHeader ? 'PRESENT' : 'MISSING'}`)
-  if (authHeader) {
-    console.log(`[AUTH] Authorization header value: ${authHeader.substring(0, 20)}...`)
-  }
-  
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.substring(7)
-    console.log(`[AUTH] Auth header found: true, token length: ${token.length}`)
-    return token
+    return authHeader.substring(7)
   }
-  
-  console.log('[AUTH] Auth header found: false')
 
   return null
 }
@@ -58,45 +47,13 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
     }
 
     // Verify token with Supabase with retry logic
-    // IMPORTANT: Use Supabase Auth API directly for token validation
-    // The service role client's getUser() method doesn't work well with user tokens
     let user = null
     let error = null
     
     try {
-      // Try using the service role client first (faster)
-      let result = await supabase.auth.getUser(token)
+      const result = await supabase.auth.getUser(token)
       user = result.data?.user || null
       error = result.error || null
-      
-      // If service role client fails, try with anon key client
-      // Service role client sometimes has issues with user token validation
-      if (error && error.message?.includes('Bearer token')) {
-        const supabaseUrl = process.env.SUPABASE_URL || ''
-        const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || ''
-        
-        if (supabaseUrl && supabaseAnonKey) {
-          console.log('[AUTH] Service role client failed, trying with anon key client')
-          const { createClient } = await import('@supabase/supabase-js')
-          const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
-            auth: {
-              autoRefreshToken: false,
-              persistSession: false,
-            },
-          })
-          
-          result = await anonClient.auth.getUser(token)
-          user = result.data?.user || null
-          error = result.error || null
-        }
-      }
-      
-      if (user) {
-        console.log(`[AUTH] Token validated successfully for user: ${user.email || user.id}`)
-      } else if (error) {
-        console.log(`[AUTH] Token validation error: ${error.message || 'Unknown error'}`)
-        console.log(`[AUTH] Error status: ${error.status || 'N/A'}`)
-      }
     } catch (networkError: any) {
       // Handle network errors specifically
       const isNetworkError = 
@@ -119,15 +76,6 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
     }
 
     if (error || !user) {
-      // Log detailed error for debugging
-      if (error) {
-        console.log(`[AUTH] Token validation error: ${error.message || 'Unknown error'}`)
-        console.log(`[AUTH] Error status: ${error.status || 'N/A'}`)
-      }
-      if (!user) {
-        console.log(`[AUTH] Token validation failed: No user returned from Supabase`)
-      }
-      
       // Clear invalid cookies
       const isProduction = process.env.NODE_ENV === 'production'
       const userAgent = c.req.header('user-agent')
@@ -138,7 +86,7 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
       setCookie(c, COOKIE_NAMES.REFRESH_TOKEN, '', { httpOnly: true, secure, sameSite, maxAge: 0, path: '/' })
       setCookie(c, COOKIE_NAMES.USER_ID, '', { httpOnly: true, secure, sameSite, maxAge: 0, path: '/' })
       
-      return c.json({ error: 'Unauthorized: Invalid token', details: error?.message || 'Token validation failed' }, 401)
+      return c.json({ error: 'Unauthorized: Invalid token' }, 401)
     }
 
     // Get user role from database - try with regular client first
