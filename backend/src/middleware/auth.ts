@@ -64,11 +64,32 @@ export async function authMiddleware(c: Context<{ Variables: AuthVariables }>, n
     let error = null
     
     try {
-      // Use Supabase client's getUser() method - this is the recommended way
-      // The service role client can validate user tokens using getUser()
-      const result = await supabase.auth.getUser(token)
+      // Try using the service role client first (faster)
+      let result = await supabase.auth.getUser(token)
       user = result.data?.user || null
       error = result.error || null
+      
+      // If service role client fails, try with anon key client
+      // Service role client sometimes has issues with user token validation
+      if (error && error.message?.includes('Bearer token')) {
+        const supabaseUrl = process.env.SUPABASE_URL || ''
+        const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || ''
+        
+        if (supabaseUrl && supabaseAnonKey) {
+          console.log('[AUTH] Service role client failed, trying with anon key client')
+          const { createClient } = await import('@supabase/supabase-js')
+          const anonClient = createClient(supabaseUrl, supabaseAnonKey, {
+            auth: {
+              autoRefreshToken: false,
+              persistSession: false,
+            },
+          })
+          
+          result = await anonClient.auth.getUser(token)
+          user = result.data?.user || null
+          error = result.error || null
+        }
+      }
       
       if (user) {
         console.log(`[AUTH] Token validated successfully for user: ${user.email || user.id}`)
