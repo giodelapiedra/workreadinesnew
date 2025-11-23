@@ -1098,6 +1098,10 @@ admin.get('/clinicians/:id', authMiddleware, requireRole(['admin']), async (c) =
     }
 
     // OPTIMIZATION: Fetch all data in parallel
+    // Only show exception types that are considered "incidents":
+    // - accident, injury, medical_leave, other (exclude 'transfer' as it's administrative, not an incident)
+    const incidentTypes = ['accident', 'injury', 'medical_leave', 'other']
+    
     const [casesResult, appointmentsResult, rehabPlansResult] = await Promise.all([
       adminClient
         .from('worker_exceptions')

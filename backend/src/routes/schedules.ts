@@ -551,27 +551,7 @@ schedules.post('/workers', authMiddleware, requireRole(['team_leader']), async (
       }, 500)
     }
 
-    // Invalidate cache for analytics (since new schedule affects analytics)
-    try {
-      const { cache } = await import('../utils/cache.js')
-      
-      // Invalidate analytics cache for this team leader
-      cache.deleteByUserId(user.id, ['analytics'])
-      
-      // Also invalidate supervisor analytics if supervisor exists
-      const { data: supervisorData } = await adminClient
-        .from('teams')
-        .select('supervisor_id')
-        .eq('id', team.id)
-        .single()
-      
-      if (supervisorData?.supervisor_id) {
-        cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
-      }
-    } catch (cacheError: any) {
-      console.error('[POST /schedules/workers] Error invalidating cache:', cacheError)
-      // Don't fail the request if cache invalidation fails
-    }
+    // Cache invalidation removed - cache.js was deleted as unused code
 
     const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
     const createdDays = isRecurringMode 
@@ -916,39 +896,7 @@ schedules.put('/workers/:id', authMiddleware, requireRole(['team_leader']), asyn
       return c.json({ error: 'Failed to update worker schedule', details: error.message }, 500)
     }
 
-    // Invalidate cache for analytics (since schedule update affects analytics)
-    try {
-      const { cache } = await import('../utils/cache.js')
-      
-      // Get team_id from updated schedule
-      const { data: updatedSchedule } = await adminClient
-        .from('worker_schedules')
-        .select('team_id')
-        .eq('id', scheduleId)
-        .single()
-      
-      if (updatedSchedule?.team_id) {
-        // Get team leader and supervisor IDs
-        const { data: teamData } = await adminClient
-          .from('teams')
-          .select('team_leader_id, supervisor_id')
-          .eq('id', updatedSchedule.team_id)
-          .single()
-        
-        // Invalidate team leader analytics
-        if (teamData?.team_leader_id) {
-          cache.deleteByUserId(teamData.team_leader_id, ['analytics'])
-        }
-        
-        // Invalidate supervisor analytics
-        if (teamData?.supervisor_id) {
-          cache.deleteByUserId(teamData.supervisor_id, ['supervisor-analytics'])
-        }
-      }
-    } catch (cacheError: any) {
-      console.error('[PUT /schedules/workers/:id] Error invalidating cache:', cacheError)
-      // Don't fail the request if cache invalidation fails
-    }
+    // Cache invalidation removed - cache.js was deleted as unused code
 
     return c.json({
       message: 'Worker schedule updated successfully',

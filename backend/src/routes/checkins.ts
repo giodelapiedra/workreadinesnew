@@ -1069,38 +1069,7 @@ checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
       }
     }
 
-    // Invalidate cache for analytics (since new check-in affects analytics)
-    try {
-      const { cache } = await import('../utils/cache.js')
-      
-      // Invalidate analytics cache for team leader (if worker is in a team)
-      if (teamMember?.team_id) {
-        const { data: team } = await adminClient
-          .from('teams')
-          .select('team_leader_id')
-          .eq('id', teamMember.team_id)
-          .single()
-        
-        if (team?.team_leader_id) {
-          // Delete all analytics cache entries for this team leader
-          cache.deleteByUserId(team.team_leader_id, ['analytics'])
-          
-          // Also invalidate supervisor analytics (if supervisor exists)
-          const { data: supervisorData } = await adminClient
-            .from('teams')
-            .select('supervisor_id')
-            .eq('id', teamMember.team_id)
-            .single()
-          
-          if (supervisorData?.supervisor_id) {
-            cache.deleteByUserId(supervisorData.supervisor_id, ['supervisor-analytics'])
-          }
-        }
-      }
-    } catch (cacheError: any) {
-      console.error('[POST /checkins] Error invalidating cache:', cacheError)
-      // Don't fail the check-in request if cache invalidation fails
-    }
+    // Cache invalidation removed - cache.js was deleted as unused code
 
     return c.json({
       message: 'Check-in submitted successfully',
