@@ -11,9 +11,8 @@ export default defineConfig({
         manualChunks: {
           // Vendor chunks - group by library
           'vendor-react': ['react', 'react-dom', 'react-router-dom'],
-          'vendor-mui': ['@mui/material', '@mui/icons-material'],
-          'vendor-query': ['@tanstack/react-query'],
-          'vendor-redux': ['@reduxjs/toolkit', 'react-redux'],
+          'vendor-supabase': ['@supabase/supabase-js'],
+          'vendor-qrcode': ['qrcode.react', 'html5-qrcode'],
         },
       },
     },
@@ -22,6 +21,6 @@ export default defineConfig({
   },
   // Optimize dependencies
   optimizeDeps: {
-    include: ['react', 'react-dom', 'react-router-dom', '@mui/material', '@mui/icons-material'],
+    include: ['react', 'react-dom', 'react-router-dom', '@supabase/supabase-js'],
   },
 })
