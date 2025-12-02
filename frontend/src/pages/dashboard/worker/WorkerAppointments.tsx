@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { formatTime, formatDateDisplay } from '../../../shared/date'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './WorkerAppointments.css'
 
 interface Appointment {
@@ -51,24 +53,23 @@ export function WorkerAppointments() {
       setError('')
 
       const status = statusFilter === 'all' ? 'all' : statusFilter
-      const response = await fetch(
-        `${API_BASE_URL}/api/checkins/appointments?page=${currentPage}&limit=${itemsPerPage}&status=${status}&_t=${Date.now()}`,
+      const result = await apiClient.get<{
+        appointments: Appointment[]
+        pagination: { totalPages: number; total: number }
+      }>(
+        `${API_ROUTES.CHECKINS.APPOINTMENTS}?page=${currentPage}&limit=${itemsPerPage}&status=${status}&_t=${Date.now()}`,
         {
-          method: 'GET',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
+          headers: { 'Cache-Control': 'no-cache' },
         }
       )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to fetch appointments' }))
-        throw new Error(errorData.error || 'Failed to fetch appointments')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch appointments')
       }
 
-      const data = await response.json()
-      setAppointments(data.appointments || [])
-      setTotalPages(data.pagination?.totalPages || 1)
-      setTotalItems(data.pagination?.total || 0)
+      setAppointments(result.data.appointments || [])
+      setTotalPages(result.data.pagination?.totalPages || 1)
+      setTotalItems(result.data.pagination?.total || 0)
     } catch (err: any) {
       console.error('Error fetching appointments:', err)
       setError(err.message || 'Failed to fetch appointments')
@@ -84,16 +85,13 @@ export function WorkerAppointments() {
   const handleApprove = async (appointmentId: string) => {
     try {
       setUpdating(true)
-      const response = await fetch(`${API_BASE_URL}/api/checkins/appointments/${appointmentId}/status`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'confirmed' }),
-      })
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.CHECKINS.APPOINTMENT_STATUS(appointmentId),
+        { status: 'confirmed' }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to approve appointment' }))
-        throw new Error(errorData.error || 'Failed to approve appointment')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to approve appointment')
       }
 
       fetchAppointments()
@@ -112,16 +110,13 @@ export function WorkerAppointments() {
 
     try {
       setUpdating(true)
-      const response = await fetch(`${API_BASE_URL}/api/checkins/appointments/${appointmentId}/status`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'declined' }),
-      })
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.CHECKINS.APPOINTMENT_STATUS(appointmentId),
+        { status: 'declined' }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to decline appointment' }))
-        throw new Error(errorData.error || 'Failed to decline appointment')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to decline appointment')
       }
 
       fetchAppointments()
@@ -133,15 +128,7 @@ export function WorkerAppointments() {
     }
   }
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
-  }
-
-  const formatTime = (timeStr: string) => {
-    const [hours, minutes] = timeStr.split(':')
-    const hour = parseInt(hours)
-    return `${hour % 12 || 12}:${minutes} ${hour >= 12 ? 'PM' : 'AM'}`
-  }
+  const formatDate = (dateStr: string) => formatDateDisplay(dateStr)
 
   const pendingCount = appointments.filter((apt) => apt.status === 'pending').length
   const confirmedCount = appointments.filter((apt) => apt.status === 'confirmed').length

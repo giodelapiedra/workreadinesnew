@@ -17,10 +17,16 @@
   transform: translateX(-100%);
   width: 280px;
   z-index: 1001;
+  filter: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .sidebar.mobile.open {
   transform: translateX(0);
+  filter: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* Desktop Styles */
@@ -49,6 +55,10 @@
   justify-content: center;
 }
 
+/* ========================================
+   SIDEBAR HEADER - LOGO SECTION
+   ======================================== */
+
 .sidebar-header {
   padding: 20px 16px;
   border-bottom: 1px solid #E2E8F0;
@@ -57,26 +67,44 @@
 .sidebar-logo {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   color: #0F172A;
   font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
+/* Logo Icon - Perfect Circle, Not Oblong */
 .sidebar-logo svg {
-  color: #3B82F6;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  padding: 6px;
+  background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+  border-radius: 10px;
+  color: white;
   flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
 }
 
 .sidebar-brand {
   color: #0F172A;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
+
+/* ========================================
+   NAVIGATION
+   ======================================== */
 
 .sidebar-nav {
   flex: 1;
   overflow-y: auto;
-  padding: 8px;
+  padding: 12px 8px;
 }
 
 .sidebar-nav::-webkit-scrollbar {
@@ -100,7 +128,30 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  margin-bottom: 20px;
 }
+
+.sidebar-section:last-child {
+  margin-bottom: 0;
+}
+
+.sidebar-group-header {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #94A3B8;
+  padding: 12px 12px 8px 12px;
+  user-select: none;
+}
+
+.sidebar.desktop.closed .sidebar-group-header {
+  display: none;
+}
+
+/* ========================================
+   MENU ITEMS
+   ======================================== */
 
 .sidebar-item {
   display: flex;
@@ -111,7 +162,7 @@
   background: transparent;
   color: #64748B;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 8px;
   transition: all 0.15s ease;
   font-size: 13px;
   font-weight: 500;
@@ -127,8 +178,8 @@
 }
 
 .sidebar-item.active {
-  background: #F1F5F9;
-  color: #0F172A;
+  background: #EFF6FF;
+  color: #3B82F6;
   font-weight: 600;
 }
 
@@ -165,6 +216,9 @@
 
 .sidebar-item-label {
   flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar-item-badge {
@@ -179,17 +233,22 @@
   line-height: 1.2;
 }
 
+/* ========================================
+   FOOTER - USER PROFILE
+   ======================================== */
+
 .sidebar-footer {
   padding: 16px;
   border-top: 1px solid #E2E8F0;
+  background: #FAFBFC;
 }
 
 .sidebar-user {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px;
-  border-radius: 6px;
+  gap: 12px;
+  padding: 10px;
+  border-radius: 10px;
   transition: background 0.15s ease;
   width: 100%;
   border: none;
@@ -199,7 +258,7 @@
 }
 
 .sidebar-user:hover {
-  background: #F8FAFC;
+  background: #F1F5F9;
 }
 
 .sidebar-user-chevron {
@@ -208,19 +267,49 @@
   margin-left: auto;
 }
 
+/* User Avatar - Perfect Circle */
 .sidebar-user-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-  background: #0F172A;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  max-width: 36px;
+  max-height: 36px;
+  border-radius: 50%;
+  /* Background color for initials (when no image) */
+  background: #3B82F6;
   display: flex;
   align-items: center;
   justify-content: center;
   color: white;
   font-weight: 600;
-  font-size: 12px;
+  font-size: 13px;
   flex-shrink: 0;
   letter-spacing: 0.01em;
+  overflow: hidden;
+  aspect-ratio: 1 / 1;
+  box-sizing: border-box;
+}
+
+/* Remove background when image exists */
+.sidebar-user-avatar:has(.sidebar-user-avatar-img) {
+  background: transparent;
+}
+
+.sidebar-user-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Center top positioning ensures face is visible */
+  object-position: center 20%;
+  border-radius: 50%;
+  opacity: 1;
+  transition: opacity 0.2s ease-in-out;
+  aspect-ratio: 1 / 1;
+}
+
+.sidebar-user-avatar-img[loading] {
+  opacity: 0.5;
 }
 
 .sidebar-user-info {
@@ -230,7 +319,7 @@
 
 .sidebar-user-name {
   color: #0F172A;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -240,7 +329,7 @@
 
 .sidebar-user-role {
   color: #64748B;
-  font-size: 11px;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -248,9 +337,16 @@
   text-transform: capitalize;
 }
 
-/* Desktop closed state - ensure smooth transitions */
+/* ========================================
+   DESKTOP CLOSED STATE
+   ======================================== */
+
 .sidebar.desktop.closed .sidebar-logo {
   justify-content: center;
+}
+
+.sidebar.desktop.closed .sidebar-logo svg {
+  margin: 0;
 }
 
 .sidebar.desktop.closed .sidebar-item-icon {
@@ -277,4 +373,3 @@
 .sidebar.desktop.closed .sidebar-header {
   padding: 16px;
 }
-

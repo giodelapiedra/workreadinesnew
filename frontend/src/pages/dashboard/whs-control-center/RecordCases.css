@@ -1,10 +1,10 @@
 .record-cases {
   background-color: #FFFFFF;
-  min-height: 100vh;
-  padding: 40px;
-  max-width: 1800px;
+  min-height: calc(100vh - 64px);
+  padding: 24px;
+  max-width: 1600px;
   margin: 0 auto;
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
 }
 
 /* Header */
@@ -21,9 +21,10 @@
 }
 
 .record-cases-subtitle {
-  font-size: 14px;
+  font-size: 15px;
   color: #64748B;
   margin: 0;
+  font-weight: 500;
 }
 
 /* Toolbar */
@@ -48,12 +49,8 @@
   gap: 12px;
 }
 
-.record-cases-add-btn,
-.record-cases-filter-btn,
-.record-cases-sort-btn,
 .record-cases-refresh-btn,
 .record-cases-download-btn,
-.record-cases-view-btn,
 .record-cases-pagination-btn {
   width: 36px;
   height: 36px;
@@ -61,29 +58,15 @@
   align-items: center;
   justify-content: center;
   background: #FFFFFF;
-  border: 1px solid #E2E8F0;
-  border-radius: 6px;
+  border: 1.5px solid #E2E8F0;
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   color: #64748B;
 }
 
-.record-cases-add-btn {
-  background: #10B981;
-  border-color: #10B981;
-  color: #FFFFFF;
-}
-
-.record-cases-add-btn:hover {
-  background: #059669;
-  border-color: #059669;
-}
-
-.record-cases-filter-btn:hover,
-.record-cases-sort-btn:hover,
 .record-cases-refresh-btn:hover,
 .record-cases-download-btn:hover,
-.record-cases-view-btn:hover,
 .record-cases-pagination-btn:hover:not(:disabled) {
   background: #F8FAFC;
   border-color: #CBD5E1;
@@ -125,13 +108,13 @@
 
 .record-cases-search-input {
   width: 100%;
-  padding: 10px 12px 10px 36px;
+  padding: 14px 16px 14px 40px;
   background: #FFFFFF;
   border: 1px solid #E2E8F0;
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: 8px;
+  font-size: 14px;
   color: #0F172A;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition: all 0.2s ease;
 }
 
 .record-cases-search-input:focus {
@@ -162,18 +145,18 @@
 }
 
 .record-cases-filter-select {
-  padding: 10px 36px 10px 12px;
+  padding: 14px 40px 14px 16px;
   background: #FFFFFF;
   border: 1px solid #E2E8F0;
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: 8px;
+  font-size: 14px;
   color: #0F172A;
   cursor: pointer;
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg width='12' height='12' viewBox='0 0 12 12' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2364748B' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 12px center;
-  transition: border-color 0.15s;
+  transition: all 0.2s ease;
 }
 
 .record-cases-filter-select:hover {
@@ -200,7 +183,7 @@
 }
 
 .record-cases-table thead {
-  background: #FAFBFC;
+  background: #F8FAFC;
 }
 
 .record-cases-table th {
@@ -221,7 +204,7 @@
 }
 
 .record-cases-table tbody tr:hover {
-  background: #FAFBFC;
+  background: #F8FAFC;
 }
 
 .record-cases-table tbody tr:last-child {
@@ -229,8 +212,8 @@
 }
 
 .record-cases-table td {
-  padding: 16px;
-  font-size: 13px;
+  padding: 12px 16px;
+  font-size: 14px;
   color: #0F172A;
 }
 
@@ -299,19 +282,22 @@
 }
 
 .record-cases-view-details {
-  padding: 6px 12px;
-  background: transparent;
+  padding: 8px 16px;
+  background: #3B82F6;
   border: none;
-  color: #3B82F6;
-  font-size: 13px;
-  font-weight: 500;
+  border-radius: 8px;
+  color: #FFFFFF;
+  font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
-  text-decoration: underline;
-  transition: color 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .record-cases-view-details:hover {
-  color: #2563EB;
+  background: #2563EB;
+  color: #FFFFFF;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
 }
 
 /* Loading, Error, Empty States */
@@ -326,6 +312,25 @@
 
 .record-cases-error {
   color: #EF4444;
+}
+
+.record-cases-empty-icon {
+  margin: 0 auto 16px;
+  color: #94A3B8;
+  display: block;
+}
+
+.record-cases-empty-title {
+  font-weight: 500;
+  color: #0F172A;
+  margin: 0 0 4px 0;
+  font-size: 15px;
+}
+
+.record-cases-empty-message {
+  font-size: 13px;
+  color: #64748B;
+  margin: 0;
 }
 
 /* Modal Styles */
@@ -419,52 +424,171 @@
 }
 
 .record-cases-modal-body {
-  padding: 24px;
+  padding: 0;
   overflow-y: auto;
   flex: 1;
 }
 
+/* Modal Header Info Section */
+.record-cases-modal-header-info {
+  padding: 24px;
+  background: linear-gradient(135deg, #F8FAFC 0%, #FFFFFF 100%);
+  border-bottom: 1px solid #E2E8F0;
+}
+
+.record-cases-header-badge-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.record-cases-status-badge-large {
+  display: inline-block;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.record-cases-severity-badge {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.record-cases-severity-badge.severity-high {
+  background: #FEE2E2;
+  color: #DC2626;
+}
+
+.record-cases-severity-badge.severity-medium {
+  background: #FEF3C7;
+  color: #D97706;
+}
+
+.record-cases-severity-badge.severity-low {
+  background: #D1FAE5;
+  color: #059669;
+}
+
+.record-cases-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.record-cases-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #64748B;
+}
+
+.record-cases-meta-item svg {
+  flex-shrink: 0;
+  color: #94A3B8;
+}
+
 .record-cases-details-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 24px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0;
+  padding: 24px;
 }
 
 .record-cases-detail-section {
+  padding: 20px;
+  border-right: 1px solid #E2E8F0;
+  border-bottom: 1px solid #E2E8F0;
+}
+
+.record-cases-detail-section:last-child {
+  border-right: none;
+}
+
+.record-cases-detail-section:nth-child(3n) {
+  border-right: none;
+}
+
+.record-cases-detail-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0F172A;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 16px 0;
+  padding-bottom: 12px;
+  border-bottom: 2px solid #E2E8F0;
+}
+
+.record-cases-detail-section-title svg {
+  flex-shrink: 0;
+  color: #64748B;
+}
+
+.record-cases-detail-list {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.record-cases-detail-section-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: #0F172A;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin: 0 0 8px 0;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #E2E8F0;
-}
-
 .record-cases-detail-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 6px;
+  transition: background-color 0.15s;
+}
+
+.record-cases-detail-item:hover {
+  background: #F8FAFC;
+}
+
+.record-cases-detail-item.highlight {
+  background: #F0F9FF;
+  border-left: 3px solid #3B82F6;
+  padding-left: 16px;
+}
+
+.record-cases-detail-item.full-width {
+  grid-column: 1 / -1;
 }
 
 .record-cases-detail-label {
-  font-size: 12px;
+  font-size: 11px;
   color: #64748B;
-  font-weight: 500;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.05em;
+  margin-bottom: 2px;
 }
 
 .record-cases-detail-value {
   font-size: 14px;
   color: #0F172A;
   font-weight: 500;
+  line-height: 1.5;
+}
+
+.record-cases-case-number {
+  font-family: 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  color: #3B82F6;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .record-cases-status-badge {
@@ -503,10 +627,18 @@
   border-color: #CBD5E1;
 }
 
-/* Responsive */
+/* Responsive Design */
 @media (max-width: 768px) {
   .record-cases {
-    padding: 20px;
+    padding: 16px;
+  }
+
+  .record-cases-header {
+    margin-bottom: 20px;
+  }
+
+  .record-cases-title {
+    font-size: 24px;
   }
 
   .record-cases-toolbar {
@@ -540,15 +672,36 @@
 
   .record-cases-details-grid {
     grid-template-columns: 1fr;
-    gap: 20px;
+    padding: 16px;
+  }
+
+  .record-cases-detail-section {
+    border-right: none;
+    border-bottom: 1px solid #E2E8F0;
+    padding: 16px;
+  }
+
+  .record-cases-detail-section:last-child {
+    border-bottom: none;
   }
 
   .record-cases-modal-header {
     padding: 20px;
   }
 
-  .record-cases-modal-body {
+  .record-cases-modal-header-info {
     padding: 20px;
+  }
+
+  .record-cases-header-badge-group {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .record-cases-header-meta {
+    flex-direction: column;
+    gap: 12px;
   }
 }
 

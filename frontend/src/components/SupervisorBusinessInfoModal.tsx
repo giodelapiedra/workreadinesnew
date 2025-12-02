@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useAuth } from '../contexts/AuthContext'
-import { API_BASE_URL } from '../config/api'
-import { handleApiResponse, isValidBusinessRegNumber } from '../utils/apiHelpers'
+import { isValidBusinessRegNumber } from '../utils/apiHelpers'
+import { authService } from '../services/authService'
+import { isApiError, getApiErrorMessage } from '../lib/apiClient'
 import './SupervisorBusinessInfoModal.css'
 
 interface SupervisorBusinessInfoModalProps {
@@ -36,20 +37,13 @@ export function SupervisorBusinessInfoModal({ onComplete }: SupervisorBusinessIn
     }
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/profile`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          business_name: trimmedBusinessName,
-          business_registration_number: trimmedRegNumber,
-        }),
+      const result = await authService.updateProfile({
+        business_name: trimmedBusinessName,
+        business_registration_number: trimmedRegNumber,
       })
 
-      const result = await handleApiResponse(response)
-
-      if (!result.success) {
-        setError(result.error || 'Failed to update business information')
+      if (isApiError(result)) {
+        setError(getApiErrorMessage(result) || 'Failed to update business information')
         setLoading(false)
         return
       }

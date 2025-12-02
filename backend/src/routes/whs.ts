@@ -6,6 +6,8 @@ import { getAdminClient } from '../utils/adminClient.js'
 import { normalizeDate, isDateInRange } from '../utils/dateTime.js'
 import { formatUserFullName } from '../utils/userUtils.js'
 import { calculateAge } from '../utils/ageUtils.js'
+import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath } from '../utils/photoUrl.js'
+import { getFromR2 } from '../utils/r2Storage.js'
 import { encodeCursor, decodeCursor, extractCursorDate } from '../utils/cursorPagination.js'
 
 // OPTIMIZATION: Constants for active case statuses (avoid recreating array)
@@ -201,6 +203,26 @@ whs.get('/cases', authMiddleware, requireRole(['whs_control_center']), async (c)
       }
     }
 
+    // OPTIMIZATION: Fetch all related incidents in one query
+    const caseUserIds = (cases || []).map((c: any) => c.user_id)
+    const caseStartDates = (cases || []).map((c: any) => c.start_date)
+    
+    const { data: relatedIncidents } = await adminClient
+      .from('incidents')
+      .select('id, user_id, incident_date, photo_url, ai_analysis_result, description, severity')
+      .in('user_id', caseUserIds.length > 0 ? caseUserIds : ['00000000-0000-0000-0000-000000000000'])
+      .in('incident_date', caseStartDates.length > 0 ? caseStartDates : ['1900-01-01'])
+      .eq('approval_status', 'approved')
+    
+    // Create map for O(1) lookup: key = `${user_id}_${incident_date}`
+    const incidentMap = new Map()
+    if (relatedIncidents) {
+      relatedIncidents.forEach((inc: any) => {
+        const key = `${inc.user_id}_${inc.incident_date}`
+        incidentMap.set(key, inc)
+      })
+    }
+
     // Format cases
     const todayDate = new Date()
     let formattedCases = (cases || []).map((incident: any) => {
@@ -299,6 +321,31 @@ whs.get('/cases', authMiddleware, requireRole(['whs_control_center']), async (c)
         returnToWorkDate: incident.return_to_work_date || null,
         // OPTIMIZATION: Store internal case status for filtering
         _caseStatus: caseStatusFromNotes || 'new',
+        // Include incident photo and AI analysis
+        // Convert R2 URLs to proxy URLs to avoid DNS resolution issues
+        incidentPhotoUrl: (() => {
+          const incidentKey = `${incident.user_id}_${incident.start_date}`
+          const relatedIncident = incidentMap.get(incidentKey)
+          if (relatedIncident?.id) {
+            return getIncidentPhotoProxyUrl(relatedIncident.photo_url, relatedIncident.id, 'whs')
+          }
+          return null
+        })(),
+        incidentAiAnalysis: (() => {
+          const incidentKey = `${incident.user_id}_${incident.start_date}`
+          const relatedIncident = incidentMap.get(incidentKey)
+          if (relatedIncident?.ai_analysis_result) {
+            try {
+              if (typeof relatedIncident.ai_analysis_result === 'string') {
+                return JSON.parse(relatedIncident.ai_analysis_result)
+              }
+              return relatedIncident.ai_analysis_result
+            } catch {
+              return null
+            }
+          }
+          return null
+        })(),
       }
     })
 
@@ -524,7 +571,10 @@ whs.get('/cases/:id', authMiddleware, requireRole(['whs_control_center']), async
     const team = Array.isArray(caseData.teams) ? caseData.teams[0] : caseData.teams
     const userIds = [team?.supervisor_id, team?.team_leader_id].filter(Boolean)
     
-    const [teamMemberResult, usersResult] = await Promise.all([
+    // Get related incident (for photo and AI analysis)
+    const incidentDate = caseData.start_date
+    
+    const [teamMemberResult, usersResult, incidentResult] = await Promise.all([
       // Get phone number
       adminClient
         .from('team_members')
@@ -540,6 +590,47 @@ whs.get('/cases/:id', authMiddleware, requireRole(['whs_control_center']), async
             .select('id, email, first_name, last_name, full_name, gender, date_of_birth')
             .in('id', userIds)
         : Promise.resolve({ data: [] }),
+      
+      // Get related incident (for photo and AI analysis)
+      // Use flexible matching to handle date format differences
+      (async () => {
+        // First try exact date match
+        const { data: exactMatch } = await adminClient
+          .from('incidents')
+          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .eq('user_id', caseData.user_id)
+          .eq('incident_date', incidentDate)
+          .eq('approval_status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        
+        if (exactMatch) {
+          return { data: exactMatch }
+        }
+        
+        // Fallback: Get most recent approved incident for this user within 7 days
+        const { data: recentIncident } = await adminClient
+          .from('incidents')
+          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .eq('user_id', caseData.user_id)
+          .eq('approval_status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        
+        if (recentIncident) {
+          const incidentDateObj = new Date(recentIncident.incident_date)
+          const exceptionDateObj = new Date(incidentDate)
+          const daysDiff = Math.abs((incidentDateObj.getTime() - exceptionDateObj.getTime()) / (1000 * 60 * 60 * 24))
+          
+          if (daysDiff <= 7) {
+            return { data: recentIncident }
+          }
+        }
+        
+        return { data: null }
+      })()
     ])
 
     // Build user map for O(1) lookups
@@ -586,6 +677,20 @@ whs.get('/cases/:id', authMiddleware, requireRole(['whs_control_center']), async
       priority = 'LOW'
     }
 
+    // Parse AI analysis if available
+    let aiAnalysis = null
+    if (incidentResult.data?.ai_analysis_result) {
+      try {
+        if (typeof incidentResult.data.ai_analysis_result === 'string') {
+          aiAnalysis = JSON.parse(incidentResult.data.ai_analysis_result)
+        } else {
+          aiAnalysis = incidentResult.data.ai_analysis_result
+        }
+      } catch (parseError) {
+        console.warn('[GET /whs/cases/:id] Failed to parse AI analysis:', parseError)
+      }
+    }
+
     const formattedCase = {
       id: caseData.id,
       caseNumber: generateCaseNumber(caseData.id, caseData.created_at),
@@ -607,6 +712,22 @@ whs.get('/cases/:id', authMiddleware, requireRole(['whs_control_center']), async
       startDate: caseData.start_date,
       endDate: caseData.end_date,
       status: mapCaseStatusToDisplay(caseStatusFromNotes, false, isCurrentlyActive),
+      // Include incident photo and AI analysis (both formats for backward compatibility)
+      // Convert R2 URLs to proxy URLs to avoid DNS resolution issues
+      incidentPhotoUrl: incidentResult.data?.id 
+        ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'whs') 
+        : null,
+      incidentId: incidentResult.data?.id || null,
+      incidentAiAnalysis: aiAnalysis,
+      incident: {
+        photoUrl: incidentResult.data?.id 
+          ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'whs') 
+          : null,
+        incidentId: incidentResult.data?.id || null,
+        aiAnalysis: aiAnalysis,
+        description: incidentResult.data?.description || null,
+        severity: incidentResult.data?.severity || null,
+      },
       priority,
       isActive: isCurrentlyActive,
       caseStatus: caseStatusFromNotes || null,
@@ -1669,6 +1790,66 @@ whs.get('/clinicians/performance', authMiddleware, requireRole(['whs_control_cen
     return c.json({ clinicians: performanceData })
   } catch (error: any) {
     console.error('[GET /whs/clinicians/performance] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get incident photo (proxy endpoint to serve R2 images)
+// This avoids DNS resolution issues with R2 public URLs
+whs.get('/incident-photo/:incidentId', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const incidentId = c.req.param('incidentId')
+    
+    if (!incidentId) {
+      return c.json({ error: 'Incident ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get incident's photo URL
+    const { data: incident, error: incidentError } = await adminClient
+      .from('incidents')
+      .select('photo_url, user_id')
+      .eq('id', incidentId)
+      .single()
+
+    if (incidentError || !incident) {
+      return c.json({ error: 'Incident not found' }, 404)
+    }
+
+    if (!incident.photo_url) {
+      return c.json({ error: 'Incident photo not found' }, 404)
+    }
+
+    // Extract file path from R2 URL using centralized utility
+    const filePath = extractR2FilePath(incident.photo_url)
+
+    if (!filePath) {
+      // If we can't extract path, try to redirect
+      console.warn(`[GET /whs/incident-photo/:incidentId] Could not extract file path from URL: ${incident.photo_url}`)
+      return c.redirect(incident.photo_url)
+    }
+
+    // Fetch image from R2
+    try {
+      const imageBuffer = await getFromR2(filePath)
+      
+      // Determine content type from file extension using centralized utility
+      const contentType = getContentTypeFromFilePath(filePath)
+
+      // Set appropriate headers
+      c.header('Content-Type', contentType)
+      c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year
+      c.header('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
+      
+      return c.body(imageBuffer as any)
+    } catch (r2Error: any) {
+      console.error(`[GET /whs/incident-photo/:incidentId] Error fetching from R2:`, r2Error)
+      // Fallback: redirect to original URL
+      return c.redirect(incident.photo_url)
+    }
+  } catch (error: any) {
+    console.error('[GET /whs/incident-photo/:incidentId] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })

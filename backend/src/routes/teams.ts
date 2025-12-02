@@ -10,6 +10,13 @@ import { getTodayDateString, getTodayDate } from '../utils/dateUtils.js'
 import { isExceptionActive } from '../utils/exceptionUtils.js'
 import { formatTeamLeader, formatUserFullName } from '../utils/userUtils.js'
 import { encodeCursor, decodeCursor, extractCursorDate } from '../utils/cursorPagination.js'
+import {
+  getPendingIncidentsForTeam,
+  approveIncident,
+  rejectIncident,
+  notifyIncidentApproved,
+  notifyIncidentRejected,
+} from '../utils/incidentApproval.js'
 
 const teams = new Hono<{ Variables: AuthVariables }>()
 
@@ -3449,6 +3456,225 @@ teams.patch('/notifications/read-all', authMiddleware, requireRole(['team_leader
   } catch (error: any) {
     console.error('[PATCH /teams/notifications/read-all] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// ============================================
+// Incident Approval Endpoints (Team Leader)
+// ============================================
+
+// Get incidents for team leader's team (pending, approved, or rejected)
+teams.get('/incidents', authMiddleware, requireRole(['team_leader']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const status = c.req.query('status') || 'pending' // 'pending', 'approved', 'rejected'
+
+    const adminClient = getAdminClient()
+
+    // Get team leader's team
+    const { data: team, error: teamError } = await adminClient
+      .from('teams')
+      .select('id')
+      .eq('team_leader_id', user.id)
+      .single()
+
+    if (teamError || !team) {
+      return c.json({ error: 'Team not found' }, 404)
+    }
+
+    // Get incidents based on status
+    let incidents
+    if (status === 'pending') {
+      // Use utility function for pending incidents
+      incidents = await getPendingIncidentsForTeam(team.id)
+    } else {
+      // For approved/rejected, query directly
+      const { data, error } = await adminClient
+        .from('incidents')
+        .select(`
+          *,
+          users!incidents_user_id_fkey(
+            id, email, first_name, last_name, full_name,
+            gender, date_of_birth, profile_image_url
+          )
+        `)
+        .eq('team_id', team.id)
+        .eq('approval_status', status === 'approved' ? 'approved' : 'rejected')
+        .order('incident_date', { ascending: false })
+        .order('created_at', { ascending: false })
+
+      if (error) {
+        throw new Error(`Failed to fetch ${status} incidents: ${error.message}`)
+      }
+
+      incidents = data || []
+    }
+
+    return c.json({
+      success: true,
+      incidents,
+    })
+  } catch (error: any) {
+    console.error('[GET /teams/incidents] Error:', error)
+    return c.json({ error: 'Failed to fetch incidents', details: error.message }, 500)
+  }
+})
+
+// Approve incident (Team Leader)
+teams.post('/approve-incident/:incidentId', authMiddleware, requireRole(['team_leader']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const incidentId = c.req.param('incidentId')
+    const { notes } = await c.req.json()
+
+    const adminClient = getAdminClient()
+
+    // Get incident to verify it belongs to team leader's team
+    const { data: incident, error: incidentError } = await adminClient
+      .from('incidents')
+      .select('*, teams!inner(team_leader_id, supervisor_id)')
+      .eq('id', incidentId)
+      .single()
+
+    if (incidentError || !incident) {
+      return c.json({ error: 'Incident not found' }, 404)
+    }
+
+    const team = Array.isArray((incident as any).teams) ? (incident as any).teams[0] : (incident as any).teams
+    if (team?.team_leader_id !== user.id) {
+      return c.json({ error: 'Unauthorized. This incident does not belong to your team.' }, 403)
+    }
+
+    // Get worker details for notifications
+    const { data: worker, error: workerError } = await adminClient
+      .from('users')
+      .select('id, email, first_name, last_name, full_name, profile_image_url')
+      .eq('id', incident.user_id)
+      .single()
+
+    if (workerError || !worker) {
+      return c.json({ error: 'Worker not found' }, 404)
+    }
+
+    const workerName = worker.full_name || 
+                      (worker.first_name && worker.last_name 
+                        ? `${worker.first_name} ${worker.last_name}`
+                        : worker.email || 'Unknown Worker')
+
+    const teamLeaderName = (user as any).full_name ||
+                          ((user as any).first_name && (user as any).last_name
+                            ? `${(user as any).first_name} ${(user as any).last_name}`
+                            : user.email || 'Team Leader')
+
+    // Approve incident using utility function
+    const { incident: updatedIncident, exception } = await approveIncident({
+      incidentId,
+      approvedBy: user.id,
+      notes: notes || null,
+    })
+
+    // Send notifications
+    await notifyIncidentApproved({
+      workerId: incident.user_id,
+      supervisorId: team?.supervisor_id || null,
+      incidentId,
+      exceptionId: exception.id,
+      workerName,
+      teamLeaderName,
+    })
+
+    return c.json({
+      success: true,
+      message: 'Incident approved successfully',
+      incident: updatedIncident,
+      exception,
+    })
+  } catch (error: any) {
+    console.error('[POST /teams/approve-incident/:incidentId] Error:', error)
+    return c.json({ 
+      error: error.message || 'Failed to approve incident', 
+      details: error.message 
+    }, 500)
+  }
+})
+
+// Reject incident (Team Leader)
+teams.post('/reject-incident/:incidentId', authMiddleware, requireRole(['team_leader']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const incidentId = c.req.param('incidentId')
+    const { rejectionReason } = await c.req.json()
+
+    if (!rejectionReason || typeof rejectionReason !== 'string' || rejectionReason.trim().length === 0) {
+      return c.json({ error: 'Rejection reason is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get incident to verify it belongs to team leader's team
+    const { data: incident, error: incidentError } = await adminClient
+      .from('incidents')
+      .select('*, teams!inner(team_leader_id), users!incidents_user_id_fkey(id, email, first_name, last_name, full_name)')
+      .eq('id', incidentId)
+      .single()
+
+    if (incidentError || !incident) {
+      return c.json({ error: 'Incident not found' }, 404)
+    }
+
+    const team = Array.isArray((incident as any).teams) ? (incident as any).teams[0] : (incident as any).teams
+    if (team?.team_leader_id !== user.id) {
+      return c.json({ error: 'Unauthorized. This incident does not belong to your team.' }, 403)
+    }
+
+    const worker = Array.isArray((incident as any).users) ? (incident as any).users[0] : (incident as any).users
+    const workerName = worker?.full_name || 
+                      (worker?.first_name && worker?.last_name 
+                        ? `${worker.first_name} ${worker.last_name}`
+                        : worker?.email || 'Unknown Worker')
+
+    const teamLeaderName = (user as any).full_name ||
+                          ((user as any).first_name && (user as any).last_name
+                            ? `${(user as any).first_name} ${(user as any).last_name}`
+                            : user.email || 'Team Leader')
+
+    // Reject incident using utility function
+    await rejectIncident({
+      incidentId,
+      rejectedBy: user.id,
+      rejectionReason: rejectionReason.trim(),
+    })
+
+    // Send notification
+    await notifyIncidentRejected({
+      workerId: incident.user_id,
+      incidentId,
+      rejectionReason: rejectionReason.trim(),
+      teamLeaderName,
+    })
+
+    return c.json({
+      success: true,
+      message: 'Incident rejected successfully',
+    })
+  } catch (error: any) {
+    console.error('[POST /teams/reject-incident/:incidentId] Error:', error)
+    return c.json({ 
+      error: error.message || 'Failed to reject incident', 
+      details: error.message 
+    }, 500)
   }
 })
 

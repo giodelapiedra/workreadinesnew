@@ -1,7 +1,13 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { PROTECTED_ROUTES } from '../../../config/routes'
+import { getStatusStyle, getStatusInlineStyle } from '../../../utils/caseStatus'
+import { getAvatarColor, getUserInitials } from '../../../utils/avatarUtils'
+import { formatDateDisplay } from '../../../shared/date'
 import * as XLSX from 'xlsx'
 import './RecordCases.css'
 
@@ -11,7 +17,6 @@ interface Case {
   workerId: string
   workerName: string
   workerEmail: string
-  workerInitials?: string
   teamId: string
   teamName: string
   siteLocation: string
@@ -30,6 +35,10 @@ interface Case {
   isActive: boolean
   createdAt: string
   updatedAt: string
+  returnToWorkDutyType?: 'modified' | 'full' | null
+  returnToWorkDate?: string | null
+  approvedBy?: string | null
+  approvedAt?: string | null
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -40,6 +49,7 @@ const TYPE_LABELS: Record<string, string> = {
 }
 
 export function RecordCases() {
+  const navigate = useNavigate()
   const [cases, setCases] = useState<Case[]>([])
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
@@ -51,8 +61,6 @@ export function RecordCases() {
   const [totalRecords, setTotalRecords] = useState(0)
   const [refreshKey, setRefreshKey] = useState(0)
   const itemsPerPage = 200 // Show 200 records per page like in the image
-  const [selectedCase, setSelectedCase] = useState<Case | null>(null)
-  const [showViewModal, setShowViewModal] = useState(false)
   // Debounce search query to reduce API calls
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
   
@@ -80,20 +88,15 @@ export function RecordCases() {
           search: debouncedSearchQuery,
         })
 
-        const response = await fetch(`${API_BASE_URL}/api/whs/cases?${params.toString()}`, {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        })
+        const result = await apiClient.get<{ cases: Case[]; pagination: any }>(
+          `${API_ROUTES.WHS.CASES}?${params.toString()}`
+        )
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}))
-          throw new Error(errorData.error || 'Failed to fetch cases')
+        if (isApiError(result)) {
+          throw new Error(getApiErrorMessage(result) || 'Failed to fetch cases')
         }
 
-        const data = await response.json()
+        const data = result.data
         
         if (isMounted) {
           setCases(data.cases || [])
@@ -120,65 +123,16 @@ export function RecordCases() {
     }
   }, [currentPage, statusFilter, typeFilter, debouncedSearchQuery, refreshKey])
 
-  // Use cases directly from API (backend handles sorting for better performance)
-  // No client-side sorting needed - reduces memory usage and improves performance
-  const displayedCases = useMemo(() => {
-    return cases
-  }, [cases])
+  // Cases are already sorted by backend - no client-side processing needed
 
   const handleRefresh = () => {
     setCurrentPage(1)
     setRefreshKey(prev => prev + 1)
   }
 
-  const getStatusStyle = useCallback((status: string) => {
-    switch (status) {
-      case 'NEW CASE':
-        return { bg: '#DBEAFE', color: '#3B82F6' }
-      case 'TRIAGED':
-        return { bg: '#E9D5FF', color: '#8B5CF6' }
-      case 'ASSESSED':
-        return { bg: '#FEF3C7', color: '#F59E0B' }
-      case 'IN PROGRESS':
-        return { bg: '#FEF2F2', color: '#EF4444' }
-      case 'IN REHAB':
-        return { bg: '#D1FAE5', color: '#10B981' }
-      case 'RETURN TO WORK':
-        return { bg: '#CFFAFE', color: '#06B6D4' }
-      case 'CLOSED':
-        return { bg: '#F3F4F6', color: '#6B7280' }
-      default:
-        return { bg: '#F3F4F6', color: '#6B7280' }
-    }
-  }, [])
-
-  const getAvatarColor = useCallback((name: string) => {
-    const colors = [
-      '#EF4444', '#F59E0B', '#10B981', '#3B82F6', 
-      '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16'
-    ]
-    const index = name.charCodeAt(0) % colors.length
-    return colors[index]
-  }, [])
-
-  const getInitials = useCallback((name: string) => {
-    const parts = name.trim().split(' ')
-    if (parts.length >= 2) {
-      return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase()
-    }
-    return name.substring(0, 2).toUpperCase()
-  }, [])
-
-  const formatDate = useCallback((dateString: string) => {
-    const date = new Date(dateString)
-    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-  }, [])
-
   const handleDownloadExcel = useCallback(async () => {
     // Prevent multiple simultaneous exports
     if (exporting) return
-
-    const abortController = new AbortController()
     
     try {
       setExporting(true)
@@ -197,21 +151,15 @@ export function RecordCases() {
         search: debouncedSearchQuery,
       })
 
-      const response = await fetch(`${API_BASE_URL}/api/whs/cases?${params.toString()}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        signal: abortController.signal,
-      })
+      const result = await apiClient.get<{ cases: Case[] }>(
+        `${API_ROUTES.WHS.CASES}?${params.toString()}`
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch cases for export')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch cases for export')
       }
 
-      const data = await response.json()
+      const data = result.data
       const allCases = data.cases || []
 
       if (!allCases || allCases.length === 0) {
@@ -302,12 +250,6 @@ export function RecordCases() {
         {/* Toolbar */}
         <div className="record-cases-toolbar">
           <div className="record-cases-toolbar-left">
-            <button className="record-cases-add-btn" title="Add New Record">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="12" y1="5" x2="12" y2="19"></line>
-                <line x1="5" y1="12" x2="19" y2="12"></line>
-              </svg>
-            </button>
             <div className="record-cases-search">
               <svg className="record-cases-search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="11" cy="11" r="8"></circle>
@@ -321,11 +263,6 @@ export function RecordCases() {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <button className="record-cases-filter-btn" title="Filter">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
-              </svg>
-            </button>
             <button className="record-cases-refresh-btn" title="Refresh" onClick={handleRefresh}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="23 4 23 10 17 10"></polyline>
@@ -337,7 +274,7 @@ export function RecordCases() {
               className="record-cases-download-btn" 
               title={exporting ? 'Exporting...' : 'Download Excel'} 
               onClick={handleDownloadExcel}
-              disabled={displayedCases.length === 0 || loading || exporting}
+              disabled={cases.length === 0 || loading || exporting}
             >
               {exporting ? (
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="spinning">
@@ -374,13 +311,6 @@ export function RecordCases() {
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="9 18 15 12 9 6"></polyline>
-              </svg>
-            </button>
-            <button className="record-cases-view-btn" title="View Options">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="3" y1="12" x2="21" y2="12"></line>
-                <line x1="3" y1="6" x2="21" y2="6"></line>
-                <line x1="3" y1="18" x2="21" y2="18"></line>
               </svg>
             </button>
           </div>
@@ -425,16 +355,16 @@ export function RecordCases() {
             <div className="record-cases-error">
               <p>{error}</p>
             </div>
-          ) : displayedCases.length === 0 ? (
+          ) : cases.length === 0 ? (
             <div className="record-cases-empty">
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ margin: '0 auto 16px', color: '#94A3B8' }}>
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="record-cases-empty-icon">
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                 <polyline points="14 2 14 8 20 8"></polyline>
                 <line x1="16" y1="13" x2="8" y2="13"></line>
                 <line x1="16" y1="17" x2="8" y2="17"></line>
               </svg>
-              <p style={{ fontWeight: 500, color: '#0F172A', marginBottom: '4px' }}>No cases found</p>
-              <p style={{ fontSize: '13px', color: '#64748B' }}>
+              <p className="record-cases-empty-title">No cases found</p>
+              <p className="record-cases-empty-message">
                 {searchQuery || statusFilter !== 'all' || typeFilter !== 'all'
                   ? 'Try adjusting your filters'
                   : 'Cases will appear here when they are reported'}
@@ -457,11 +387,10 @@ export function RecordCases() {
                 </tr>
               </thead>
               <tbody>
-                {displayedCases.map((caseItem) => {
-                  const statusStyleObj = getStatusStyle(caseItem.status)
-                  const statusStyle = { backgroundColor: statusStyleObj.bg, color: statusStyleObj.color }
+                {cases.map((caseItem) => {
+                  const statusStyle = getStatusInlineStyle(caseItem.status)
                   const avatarColor = getAvatarColor(caseItem.workerName)
-                  const initials = getInitials(caseItem.workerName)
+                  const initials = getUserInitials(caseItem.workerName, caseItem.workerEmail)
                   
                   return (
                     <tr key={caseItem.id}>
@@ -492,8 +421,7 @@ export function RecordCases() {
                         <button
                           className="record-cases-view-details"
                           onClick={() => {
-                            setSelectedCase(caseItem)
-                            setShowViewModal(true)
+                            navigate(PROTECTED_ROUTES.WHS_CONTROL_CENTER.CASE_DETAIL.replace(':caseId', caseItem.id))
                           }}
                         >
                           View Details
@@ -506,105 +434,6 @@ export function RecordCases() {
             </table>
           )}
         </div>
-
-        {/* View Case Details Modal */}
-        {showViewModal && selectedCase && (
-          <div className="record-cases-modal-overlay" onClick={() => setShowViewModal(false)}>
-            <div className="record-cases-modal-content" onClick={(e) => e.stopPropagation()}>
-              <div className="record-cases-modal-header">
-                <div>
-                  <h2 className="record-cases-modal-title">Case Details</h2>
-                  <p className="record-cases-modal-subtitle">{selectedCase.caseNumber}</p>
-                </div>
-                <button 
-                  className="record-cases-modal-close"
-                  onClick={() => setShowViewModal(false)}
-                  aria-label="Close modal"
-                >
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                  </svg>
-                </button>
-              </div>
-
-              <div className="record-cases-modal-body">
-                <div className="record-cases-details-grid">
-                  <div className="record-cases-detail-section">
-                    <h3 className="record-cases-detail-section-title">Case Information</h3>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Case Number:</span>
-                      <span className="record-cases-detail-value">{selectedCase.caseNumber}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Status:</span>
-                      <span className="record-cases-status-badge" style={getStatusStyle(selectedCase.status)}>
-                        {selectedCase.status}
-                      </span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Severity:</span>
-                      <span className="record-cases-detail-value">{selectedCase.severity}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Incident Type:</span>
-                      <span className="record-cases-detail-value">{TYPE_LABELS[selectedCase.type] || selectedCase.type}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Created:</span>
-                      <span className="record-cases-detail-value">{formatDate(selectedCase.createdAt)}</span>
-                    </div>
-                  </div>
-
-                  <div className="record-cases-detail-section">
-                    <h3 className="record-cases-detail-section-title">Worker Information</h3>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Name:</span>
-                      <span className="record-cases-detail-value">{selectedCase.workerName}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Email:</span>
-                      <span className="record-cases-detail-value">{selectedCase.workerEmail}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Team:</span>
-                      <span className="record-cases-detail-value">{selectedCase.teamName}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Site Location:</span>
-                      <span className="record-cases-detail-value">{selectedCase.siteLocation || 'N/A'}</span>
-                    </div>
-                  </div>
-
-                  <div className="record-cases-detail-section">
-                    <h3 className="record-cases-detail-section-title">Incident Details</h3>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Start Date:</span>
-                      <span className="record-cases-detail-value">{formatDate(selectedCase.startDate)}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">End Date:</span>
-                      <span className="record-cases-detail-value">{selectedCase.endDate ? formatDate(selectedCase.endDate) : 'Ongoing'}</span>
-                    </div>
-                    <div className="record-cases-detail-item">
-                      <span className="record-cases-detail-label">Reason:</span>
-                      <span className="record-cases-detail-value">{selectedCase.reason || 'No reason provided'}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="record-cases-modal-footer">
-                <button 
-                  className="record-cases-modal-close-btn"
-                  onClick={() => setShowViewModal(false)}
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     </DashboardLayout>
   )

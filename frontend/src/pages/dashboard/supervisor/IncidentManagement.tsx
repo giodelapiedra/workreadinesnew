@@ -1,7 +1,12 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { Avatar } from '../../../components/Avatar'
+import { parseNotes } from '../../../utils/notesParser'
+import { formatDutyTypeLabel } from '../../../utils/dutyTypeUtils'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { getTodayDateString } from '../../../shared/date'
 import './IncidentManagement.css'
 
 interface Incident {
@@ -9,6 +14,7 @@ interface Incident {
   workerId: string
   workerName: string
   workerEmail: string
+  workerProfileImageUrl?: string | null
   teamId: string
   teamName: string
   type: string
@@ -24,6 +30,10 @@ interface Incident {
   notes: string | null
   createdAt: string
   updatedAt: string
+  approvedBy?: string | null
+  approvedAt?: string | null
+  returnToWorkDutyType?: 'modified' | 'full' | null
+  returnToWorkDate?: string | null
 }
 
 interface Summary {
@@ -68,18 +78,25 @@ export function IncidentManagement() {
   const [successMessage, setSuccessMessage] = useState('')
   const [showCloseConfirmModal, setShowCloseConfirmModal] = useState(false)
   const [closingIncident, setClosingIncident] = useState<Incident | null>(null)
+  const [showNewIncidentToast, setShowNewIncidentToast] = useState(false)
+  const [newIncidentMessage, setNewIncidentMessage] = useState('')
+
+  // Track previous incident IDs to detect new incidents
+  const previousIncidentIdsRef = useRef<Set<string>>(new Set())
 
   // Report form state
   const [selectedWorker, setSelectedWorker] = useState('')
   const [selectedTeam, setSelectedTeam] = useState('')
   const [incidentType, setIncidentType] = useState('injury')
   const [reason, setReason] = useState('')
-  const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0])
+  const [startDate, setStartDate] = useState(getTodayDateString())
   const [endDate, setEndDate] = useState('')
 
-  const fetchIncidents = useCallback(async () => {
+  const fetchIncidents = useCallback(async (showLoading = true) => {
     try {
-      setLoading(true)
+      if (showLoading) {
+        setLoading(true)
+      }
       setError('')
 
       const params = new URLSearchParams({
@@ -90,27 +107,66 @@ export function IncidentManagement() {
       })
 
       // Add cache-busting timestamp to ensure fresh data
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/incidents?${params.toString()}&_t=${Date.now()}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-        },
-      })
+      const result = await apiClient.get<{
+        incidents: Incident[]
+        summary: Summary
+      }>(
+        `${API_ROUTES.SUPERVISOR.INCIDENTS}?${params.toString()}&_t=${Date.now()}`,
+        {
+          headers: { 'Cache-Control': 'no-cache' },
+        }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch incidents')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch incidents')
       }
 
-      const data = await response.json()
-      console.log('[IncidentManagement] Fetched data:', {
-        incidentsCount: data.incidents?.length || 0,
-        summary: data.summary,
+      const data = result.data
+      
+      const newIncidents = data.incidents || []
+      const currentIncidentIds = new Set<string>(newIncidents.map((inc: Incident) => inc.id))
+      
+      // Detect new incidents (only if we've loaded before)
+      if (previousIncidentIdsRef.current.size > 0 && newIncidents.length > 0) {
+        const newIncidentIds = newIncidents
+          .map((inc: Incident) => inc.id)
+          .filter((id: string) => !previousIncidentIdsRef.current.has(id))
+        
+        if (newIncidentIds.length > 0) {
+          // Find the new incidents
+          const newIncidentsList = newIncidents.filter((inc: Incident) => 
+            newIncidentIds.includes(inc.id)
+          )
+          
+          // Show toast for new incidents
+          if (newIncidentsList.length === 1) {
+            const newInc = newIncidentsList[0]
+            const incidentTypeLabel = newInc.type === 'incident' ? 'Incident' : 'Near-Miss'
+            setNewIncidentMessage(`${incidentTypeLabel} reported by ${newInc.workerName}`)
+          } else {
+            setNewIncidentMessage(`${newIncidentsList.length} new incidents reported`)
+          }
+          setShowNewIncidentToast(true)
+          
+          // Auto-hide toast after 5 seconds
+          setTimeout(() => {
+            setShowNewIncidentToast(false)
+          }, 5000)
+        }
+      }
+      
+      // Update previous state
+      previousIncidentIdsRef.current = currentIncidentIds
+      
+      setIncidents(newIncidents)
+      setSummary(data.summary || {
+        total: 0,
+        active: 0,
+        closed: 0,
+        closedThisMonth: 0,
+        teamMemberCount: 0,
+        byType: {},
       })
-      setIncidents(data.incidents || [])
-      setSummary(data.summary || summary)
     } catch (err: any) {
       console.error('Error fetching incidents:', err)
       setError(err.message || 'Failed to load incidents')
@@ -121,17 +177,12 @@ export function IncidentManagement() {
 
   const fetchWorkers = useCallback(async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/incidents/workers`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.get<{ workers: Worker[] }>(
+        `${API_ROUTES.SUPERVISOR.INCIDENTS}/workers`
+      )
 
-      if (response.ok) {
-        const data = await response.json()
-        setWorkers(data.workers || [])
+      if (!isApiError(result)) {
+        setWorkers(result.data.workers || [])
       }
     } catch (err) {
       console.error('Error fetching workers:', err)
@@ -141,6 +192,18 @@ export function IncidentManagement() {
   useEffect(() => {
     fetchIncidents()
   }, [fetchIncidents])
+
+  // Auto-refresh incidents every 30 seconds to detect new reports
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // Only refresh if not loading and not in a modal
+      if (!loading && !showReportModal && !showCaseDetails && !showAssignConfirmModal && !showCloseConfirmModal) {
+        fetchIncidents(false) // Don't show loading state during auto-refresh
+      }
+    }, 30000) // 30 seconds
+
+    return () => clearInterval(interval)
+  }, [fetchIncidents, loading, showReportModal, showCaseDetails, showAssignConfirmModal, showCloseConfirmModal])
 
   useEffect(() => {
     if (showReportModal) {
@@ -158,25 +221,20 @@ export function IncidentManagement() {
       setReporting(true)
       setError('')
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/incidents`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.SUPERVISOR.INCIDENTS,
+        {
           workerId: selectedWorker,
           teamId: selectedTeam,
           type: incidentType,
           reason,
           startDate,
           endDate: endDate || null,
-        }),
-      })
+        }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to report incident')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to report incident')
       }
 
       // Reset form
@@ -184,7 +242,7 @@ export function IncidentManagement() {
       setSelectedTeam('')
       setIncidentType('injury')
       setReason('')
-      setStartDate(new Date().toISOString().split('T')[0])
+      setStartDate(getTodayDateString())
       setEndDate('')
       setShowReportModal(false)
 
@@ -200,17 +258,12 @@ export function IncidentManagement() {
   const handleAssignToWhs = async (incidentId: string) => {
     try {
       setError('')
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/incidents/${incidentId}/assign-to-whs`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.SUPERVISOR.ASSIGN_INCIDENT(incidentId)
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to assign incident to WHS')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to assign incident to WHS')
       }
 
       // Show success message
@@ -239,19 +292,15 @@ export function IncidentManagement() {
 
   const handleCloseIncident = async (incidentId: string) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/incidents/${incidentId}/close`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.patch<{ reactivatedSchedules: number }>(
+        `${API_ROUTES.SUPERVISOR.INCIDENT(incidentId)}/close`
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to close incident')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to close incident')
       }
 
-      const data = await response.json()
+      const data = result.data
       
       // Show success message with schedule reactivation info
       if (data.reactivatedSchedules > 0) {
@@ -286,46 +335,55 @@ export function IncidentManagement() {
     setShowCaseDetails(true)
   }
 
+  // Helper function to parse notes and extract approval information
+  // Removed: Using shared utility from notesParser.ts
+
   // Render action buttons for incidents
-  const renderActionButtons = (incident: Incident, isMobile = false) => (
-    <div className="action-buttons">
-      {incident.isActive && !incident.assignedToWhs && (
+  const renderActionButtons = (incident: Incident, isMobile = false) => {
+    const notesData = parseNotes(incident.notes)
+    const approvedBy = notesData?.approved_by || incident.approvedBy || null
+    const approvedAt = notesData?.approved_at || incident.approvedAt || null
+    
+    return (
+      <div className="action-buttons">
         <button
-          onClick={() => handleAssignClick(incident)}
-          className="assign-whs-btn"
-          title="Assign to WHS Case Manager"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M9 11l3 3L22 4"></path>
-            <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
-          </svg>
-          Assign to Case Manager
-        </button>
-      )}
-      {incident.isActive && incident.assignedToWhs && (
-        <span 
-          className={`assigned-badge ${isMobile ? 'mobile' : ''}`}
+          onClick={() => handleViewCaseDetails(incident)}
+          className="view-case-btn"
           title="View case details"
-          onClick={() => handleViewCaseDetails(incident)}
-          style={{ cursor: 'pointer' }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polyline points="20 6 9 17 4 12"></polyline>
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+            <circle cx="12" cy="12" r="3"></circle>
           </svg>
-          {isMobile ? 'Assigned - View Details' : 'Assigned'}
-        </span>
-      )}
-      {incident.isActive && (
-        <button
-          onClick={() => handleViewCaseDetails(incident)}
-          className="close-btn"
-          title={incident.assignedToWhs ? "View case details" : "View case details & close case"}
-        >
-          {incident.assignedToWhs ? "View Details" : "View Details & Close Case"}
+          View Case
         </button>
-      )}
-    </div>
-  )
+        {incident.isActive && !incident.assignedToWhs && (
+          <button
+            onClick={() => handleAssignClick(incident)}
+            className="assign-whs-btn"
+            title="Assign to WHS Case Manager"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M9 11l3 3L22 4"></path>
+              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+            </svg>
+            Assign to Case Manager
+          </button>
+        )}
+        {incident.isActive && incident.assignedToWhs && (
+          <span 
+            className={`assigned-badge ${isMobile ? 'mobile' : ''}`}
+            title="Assigned to WHS Case Manager"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            {isMobile ? 'Assigned' : 'Assigned'}
+          </span>
+        )}
+      </div>
+    )
+  }
 
   const getCaseStatusLabel = (status: string | null): string => {
     if (!status) return 'NOT STARTED'
@@ -372,6 +430,55 @@ export function IncidentManagement() {
     return statusOrder.indexOf(status.toLowerCase())
   }
 
+  // Helper function to format dates consistently
+  const formatDate = (dateString: string | null): string => {
+    if (!dateString) return 'Ongoing'
+    return new Date(dateString).toLocaleDateString()
+  }
+
+  // Status icon component - memoized to avoid recreation on every render
+  const getStatusIcon = useCallback((status: string, iconColor: string) => {
+    switch (status) {
+      case 'triaged':
+        return (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+        )
+      case 'assessed':
+        return (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+        )
+      case 'in_rehab':
+        return (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+            <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
+          </svg>
+        )
+      case 'return_to_work':
+        return (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+          </svg>
+        )
+      case 'closed':
+        return (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="15" y1="9" x2="9" y2="15"></line>
+            <line x1="9" y1="9" x2="15" y2="15"></line>
+          </svg>
+        )
+      default:
+        return null
+    }
+  }, [])
+
   // Filter incidents based on tab and search
   const filteredIncidents = useMemo(() => {
     const filtered = incidents.filter(incident => {
@@ -387,14 +494,6 @@ export function IncidentManagement() {
       const matchesType = filterType === 'all' || incident.type === filterType
       
       return matchesSearch && matchesTab && matchesType
-    })
-    
-    console.log('[IncidentManagement] Filtered incidents:', {
-      total: incidents.length,
-      filtered: filtered.length,
-      currentTab,
-      activeCount: incidents.filter(i => i.isActive).length,
-      closedCount: incidents.filter(i => !i.isActive).length,
     })
     
     return filtered
@@ -422,7 +521,7 @@ export function IncidentManagement() {
     return colors[type] || '#64748B'
   }
 
-  const typeOrder = ['medical_leave', 'injury', 'accident', 'transfer', 'other']
+  const typeOrder = ['medical_leave', 'injury', 'accident', 'other']
 
   return (
     <DashboardLayout>
@@ -431,7 +530,7 @@ export function IncidentManagement() {
         <div className="incident-header">
           <div className="incident-header-left">
             <h1 className="incident-title">
-              <span className="title-icon">🔔</span>
+           
               Incident Management System
             </h1>
             <p className="incident-subtitle">
@@ -440,7 +539,7 @@ export function IncidentManagement() {
           </div>
           <div className="incident-header-actions">
             <button
-              onClick={fetchIncidents}
+              onClick={() => fetchIncidents()}
               className="refresh-btn"
               title="Refresh"
             >
@@ -524,13 +623,7 @@ export function IncidentManagement() {
               <div>
                 <div className="metric-label">Team Members</div>
                 <div className="metric-detail">
-                  <span className="metric-detail-icon" aria-hidden="true">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M12 20c4.418 0 8-3.582 8-8" strokeLinecap="round" strokeLinejoin="round" />
-                      <path d="M4 4l4 4-4 4" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </span>
-                  At PA Center
+              
                 </div>
               </div>
             </div>
@@ -542,7 +635,7 @@ export function IncidentManagement() {
         <div className="incidents-by-type">
           <div className="section-header">
             <h3 className="section-title">
-              <span className="section-icon">📊</span>
+              
               Incidents by Type
             </h3>
           </div>
@@ -611,7 +704,6 @@ export function IncidentManagement() {
                 <option value="injury">Injury / Medical</option>
                 <option value="medical_leave">Sick Leave</option>
                 <option value="accident">On Leave / RDO</option>
-                <option value="transfer">Transferred</option>
                 <option value="other">Not Rostered</option>
               </select>
             </div>
@@ -649,9 +741,15 @@ export function IncidentManagement() {
                         <tr key={incident.id}>
                           <td>
                             <div className="worker-cell">
-                              <div className="worker-avatar">
-                                {incident.workerName.charAt(0).toUpperCase()}
-                              </div>
+                              <Avatar
+                                userId={incident.workerId}
+                                profileImageUrl={incident.workerProfileImageUrl}
+                                firstName={incident.workerName.split(' ')[0]}
+                                lastName={incident.workerName.split(' ').slice(1).join(' ')}
+                                email={incident.workerEmail}
+                                size="sm"
+                                showTooltip
+                              />
                               <div>
                                 <div className="worker-name">{incident.workerName}</div>
                                 <div className="worker-email">{incident.workerEmail}</div>
@@ -667,8 +765,8 @@ export function IncidentManagement() {
                             </span>
                           </td>
                           <td>{incident.teamName}</td>
-                          <td>{new Date(incident.startDate).toLocaleDateString()}</td>
-                          <td>{incident.endDate ? new Date(incident.endDate).toLocaleDateString() : 'Ongoing'}</td>
+                          <td>{formatDate(incident.startDate)}</td>
+                          <td>{formatDate(incident.endDate)}</td>
                           <td className="reason-cell">{incident.reason || '-'}</td>
                           <td>
                             {renderActionButtons(incident)}
@@ -684,9 +782,15 @@ export function IncidentManagement() {
                   {filteredIncidents.map(incident => (
                     <div key={incident.id} className="incident-card">
                       <div className="incident-card-header">
-                        <div className="worker-avatar">
-                          {incident.workerName.charAt(0).toUpperCase()}
-                        </div>
+                        <Avatar
+                          userId={incident.workerId}
+                          profileImageUrl={incident.workerProfileImageUrl}
+                          firstName={incident.workerName.split(' ')[0]}
+                          lastName={incident.workerName.split(' ').slice(1).join(' ')}
+                          email={incident.workerEmail}
+                          size="sm"
+                          showTooltip
+                        />
                         <div className="incident-card-info">
                           <div className="worker-name">{incident.workerName}</div>
                           <div className="worker-email">{incident.workerEmail}</div>
@@ -705,11 +809,11 @@ export function IncidentManagement() {
                         </div>
                         <div className="incident-card-row">
                           <span className="incident-card-label">Start Date</span>
-                          <span className="incident-card-value">{new Date(incident.startDate).toLocaleDateString()}</span>
+                          <span className="incident-card-value">{formatDate(incident.startDate)}</span>
                         </div>
                         <div className="incident-card-row">
                           <span className="incident-card-label">End Date</span>
-                          <span className="incident-card-value">{incident.endDate ? new Date(incident.endDate).toLocaleDateString() : 'Ongoing'}</span>
+                          <span className="incident-card-value">{formatDate(incident.endDate)}</span>
                         </div>
                         {incident.reason && (
                           <div className="incident-card-row">
@@ -798,7 +902,6 @@ export function IncidentManagement() {
                     <option value="injury">Injury / Medical</option>
                     <option value="medical_leave">Sick Leave</option>
                     <option value="accident">On Leave / RDO</option>
-                    <option value="transfer">Transferred</option>
                     <option value="other">Not Rostered</option>
                   </select>
                 </div>
@@ -889,51 +992,6 @@ export function IncidentManagement() {
                       const iconColor = isCompleted ? '#FFFFFF' : '#64748B'
                       const lineColor = currentStatusIndex > index ? '#27AE60' : '#E0E0E0'
 
-                      // SVG Icons for each status
-                      const getStatusIcon = () => {
-                        switch (status) {
-                          case 'new':
-                            return null // No icon for NEW
-                          case 'triaged':
-                            return (
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-                              </svg>
-                            )
-                          case 'assessed':
-                            return (
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <line x1="12" y1="5" x2="12" y2="19"></line>
-                                <line x1="5" y1="12" x2="19" y2="12"></line>
-                              </svg>
-                            )
-                          case 'in_rehab':
-                            return (
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
-                                <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
-                              </svg>
-                            )
-                          case 'return_to_work':
-                            return (
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-                                <polyline points="22 4 12 14.01 9 11.01"></polyline>
-                              </svg>
-                            )
-                          case 'closed':
-                            return (
-                              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <circle cx="12" cy="12" r="10"></circle>
-                                <line x1="15" y1="9" x2="9" y2="15"></line>
-                                <line x1="9" y1="9" x2="15" y2="15"></line>
-                              </svg>
-                            )
-                          default:
-                            return null
-                        }
-                      }
-
                       return (
                         <div key={status} className="case-progress-item-horizontal">
                           <div className="case-progress-step-horizontal">
@@ -943,7 +1001,7 @@ export function IncidentManagement() {
                                 backgroundColor: statusColor,
                               }}
                             >
-                              {getStatusIcon()}
+                              {getStatusIcon(status, iconColor)}
                             </div>
                             {index < 4 && (
                               <div
@@ -1021,11 +1079,11 @@ export function IncidentManagement() {
                     </div>
                     <div className="case-info-item">
                       <label>Start Date</label>
-                      <div>{new Date(selectedCase.startDate).toLocaleDateString()}</div>
+                      <div>{formatDate(selectedCase.startDate)}</div>
                     </div>
                     <div className="case-info-item">
                       <label>End Date</label>
-                      <div>{selectedCase.endDate ? new Date(selectedCase.endDate).toLocaleDateString() : 'Ongoing'}</div>
+                      <div>{formatDate(selectedCase.endDate)}</div>
                     </div>
                     {selectedCase.reason && (
                       <div className="case-info-item" style={{ gridColumn: '1 / -1' }}>
@@ -1033,6 +1091,78 @@ export function IncidentManagement() {
                         <div>{selectedCase.reason}</div>
                       </div>
                     )}
+                    {/* Parse notes to get approval and return to work information */}
+                    {(() => {
+                      const notesData = parseNotes(selectedCase.notes)
+                      const approvedBy = notesData?.approved_by || selectedCase.approvedBy || null
+                      const approvedAt = notesData?.approved_at || selectedCase.approvedAt || null
+                      // Try multiple sources for return to work data
+                      const returnToWorkDutyType = 
+                        notesData?.return_to_work_duty_type || 
+                        selectedCase.returnToWorkDutyType || 
+                        null
+                      const returnToWorkDate = 
+                        notesData?.return_to_work_date || 
+                        selectedCase.returnToWorkDate || 
+                        null
+                      const caseStatus = selectedCase.caseStatus?.toLowerCase()
+                      
+                      // Debug logging (remove in production if needed)
+                      if (caseStatus === 'closed' || caseStatus === 'return_to_work') {
+                        console.log('Case Details Debug:', {
+                          caseStatus,
+                          notesData,
+                          returnToWorkDutyType,
+                          returnToWorkDate,
+                          approvedBy,
+                          approvedAt,
+                          selectedCase: {
+                            returnToWorkDutyType: selectedCase.returnToWorkDutyType,
+                            returnToWorkDate: selectedCase.returnToWorkDate,
+                            approvedBy: selectedCase.approvedBy,
+                            approvedAt: selectedCase.approvedAt
+                          }
+                        })
+                      }
+                      
+                      return (
+                        <>
+                          {(caseStatus === 'closed' || caseStatus === 'return_to_work') && approvedBy && (
+                            <div className="case-info-item">
+                              <label>Approved by:</label>
+                              <div style={{ color: '#10B981', fontWeight: 600 }}>
+                                {approvedBy}
+                              </div>
+                            </div>
+                          )}
+                          {(caseStatus === 'closed' || caseStatus === 'return_to_work') && approvedAt && (
+                            <div className="case-info-item">
+                              <label>Approved at:</label>
+                              <div>{formatDate(approvedAt)}</div>
+                            </div>
+                          )}
+                          {/* Show return to work information if it exists, even when status is closed */}
+                          {returnToWorkDutyType && (
+                            <div className="case-info-item">
+                              <label>Return to Work Duty Type:</label>
+                              <div style={{ 
+                                color: '#3B82F6', 
+                                fontWeight: 600,
+                                textTransform: 'capitalize'
+                              }}>
+                                {formatDutyTypeLabel(returnToWorkDutyType)}
+                              </div>
+                            </div>
+                          )}
+                          {returnToWorkDate && (
+                            <div className="case-info-item">
+                              <label>Return to Work Date:</label>
+                              <div>{formatDate(returnToWorkDate)}</div>
+                            </div>
+                          )}
+                        </>
+                      )
+                    })()}
                   </div>
                 </div>
 
@@ -1206,6 +1336,20 @@ export function IncidentManagement() {
                 <polyline points="20 6 9 17 4 12"></polyline>
               </svg>
               <span>{successMessage}</span>
+            </div>
+          </div>
+        )}
+
+        {/* New Incident Toast Notification */}
+        {showNewIncidentToast && (
+          <div className="new-incident-toast">
+            <div className="new-incident-toast-content">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+              <span>{newIncidentMessage}</span>
             </div>
           </div>
         )}

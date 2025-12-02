@@ -4,13 +4,20 @@
  * Provides a scalable, maintainable way to handle all API requests
  * Features:
  * - Request/Response interceptors
- * - Automatic error handling
+ * - Automatic error handling (centralized)
  * - Retry logic for failed requests
  * - Request cancellation
  * - Type-safe responses
+ * - Secure error sanitization
  */
 
 import { API_BASE_URL } from '../config/api'
+import { 
+  sanitizeErrorMessage, 
+  getStatusErrorMessage, 
+  getNetworkErrorMessage,
+  handleError
+} from '../utils/errorHandler'
 
 export interface ApiError {
   message: string
@@ -47,62 +54,61 @@ class ApiClient {
     retryDelay: 1000,
     timeout: 30000, // 30 seconds
   }
+  // Request deduplication: Track pending requests to prevent duplicate API calls
+  private pendingRequests = new Map<string, Promise<ApiResult<any>>>()
 
   constructor(baseURL: string) {
     this.baseURL = baseURL
   }
 
   /**
+   * Generate a unique key for request deduplication
+   * Includes URL, method, and config to ensure identical requests are deduplicated
+   */
+  private getRequestKey(url: string, method: string, config?: RequestConfig): string {
+    // Create a stable key from URL, method, and relevant config
+    const configKey = config
+      ? JSON.stringify({
+          headers: config.headers,
+          body: config.body instanceof FormData ? '[FormData]' : config.body,
+          signal: config.signal ? '[AbortSignal]' : undefined,
+        })
+      : ''
+    return `${method}:${url}:${configKey}`
+  }
+
+  /**
    * Request interceptor - can be extended for auth tokens, etc.
+   * Handles FormData by not setting Content-Type (browser will set it with boundary)
    */
   private async interceptRequest(
     url: string,
     config: RequestConfig
   ): Promise<RequestInit> {
-    // Create headers object - handle both Headers and plain object
-    const headers = new Headers()
-    
-    // Copy existing headers from config
-    if (config.headers) {
-      if (config.headers instanceof Headers) {
-        // If it's already a Headers object, copy all entries
-        config.headers.forEach((value, key) => {
-          headers.set(key, value)
-        })
-      } else if (typeof config.headers === 'object') {
-        // If it's a plain object, set each header
-        Object.entries(config.headers).forEach(([key, value]) => {
-          if (value !== null && value !== undefined) {
-            headers.set(key, String(value))
-          }
-        })
-      }
+    const headers = new Headers(config.headers)
+
+    // Don't set Content-Type for FormData - browser will set it with boundary
+    // This allows multipart/form-data uploads to work correctly
+    if (config.body instanceof FormData) {
+      // Remove Content-Type header if it's FormData - browser will set it automatically
+      headers.delete('Content-Type')
+    } else if (!headers.has('Content-Type')) {
+      // Only set default Content-Type if not FormData and not already set
+      headers.set('Content-Type', 'application/json')
     }
 
-    // MOBILE FALLBACK: If no Authorization header is set, try to get token from localStorage
-    // This is needed because Safari on iOS often blocks cross-domain cookies
-    if (!headers.has('Authorization')) {
-      const token = localStorage.getItem('auth_token')
-      if (token) {
-        headers.set('Authorization', `Bearer ${token}`)
-        console.log('[ApiClient] Using token from localStorage (mobile fallback)')
-      } else {
-        console.log('[ApiClient] No token in localStorage, no Authorization header will be sent')
-      }
-    } else {
-      console.log('[ApiClient] Authorization header already present in request')
-    }
+    // Add any default headers here
+    // Example: if (token) headers.set('Authorization', `Bearer ${token}`)
 
-    // CRITICAL: Explicitly preserve credentials for mobile cookie support
     return {
       ...config,
       headers,
-      credentials: config.credentials || this.defaultConfig.credentials || 'include',
     }
   }
 
   /**
    * Response interceptor - handles common response logic
+   * Security: All error handling is centralized and sanitized via errorHandler utility
    */
   private async interceptResponse<T>(
     response: Response
@@ -126,7 +132,7 @@ class ApiClient {
         return {
           data: null,
           error: {
-            message: 'Invalid response format',
+            message: getStatusErrorMessage(response.status),
             status: response.status,
           },
         }
@@ -139,21 +145,16 @@ class ApiClient {
 
     // Handle error responses
     if (!response.ok) {
-      // Sanitize error message to prevent exposing sensitive data
-      let errorMessage = 'Request failed'
+      // Centralized error message extraction with sanitization
+      let errorMessage = getStatusErrorMessage(response.status)
       
-      // Only expose safe error messages
+      // Try to extract error message from response data (sanitized)
       if (data?.error && typeof data.error === 'string') {
-        // Sanitize: remove potential sensitive info
-        errorMessage = data.error
-          .replace(/password/gi, '[REDACTED]')
-          .replace(/token/gi, '[REDACTED]')
-          .replace(/secret/gi, '[REDACTED]')
-          .replace(/key/gi, '[REDACTED]')
+        errorMessage = sanitizeErrorMessage(data.error)
       } else if (data?.message && typeof data.message === 'string') {
-        errorMessage = data.message
-      } else if (response.statusText) {
-        errorMessage = response.statusText
+        errorMessage = sanitizeErrorMessage(data.message)
+      } else if (response.statusText && response.statusText !== '') {
+        errorMessage = sanitizeErrorMessage(response.statusText)
       }
 
       // Don't expose full error data in production
@@ -232,47 +233,28 @@ class ApiClient {
         : controller.signal
 
       try {
-        // CRITICAL: Ensure credentials is always 'include' for cookie support (especially mobile)
-        const finalConfig: RequestInit = {
-          ...interceptedConfig,
-          credentials: 'include', // Always include credentials for cross-domain cookies
-          signal,
-        }
-        
         // Execute request with timeout
         const response = await Promise.race([
-          fetch(fullUrl, finalConfig),
+          fetch(fullUrl, { ...interceptedConfig, signal }),
           this.createTimeout(timeout),
         ]) as Response
 
         clearTimeout(timeoutId)
 
         // Intercept response
-        const result = await this.interceptResponse<T>(response)
-        
-        // MOBILE FIX: If we get a 401 (Unauthorized), it might be a cookie timing issue
-        // Retry with increasing delays for mobile cookie processing
-        if (result.error?.status === 401 && attempt < 2) {
-          // Wait longer for cookies to be processed (mobile browsers need more time)
-          // First retry: 1.5s, Second retry: 2.5s
-          const delay = attempt === 0 ? 1500 : 2500
-          await this.sleep(delay)
-          // Retry with incremented attempt
-          return this.executeRequest<T>(url, config, attempt + 1)
-        }
-        
-        return result
+        return await this.interceptResponse<T>(response)
       } catch (error: any) {
         clearTimeout(timeoutId)
         throw error
       }
     } catch (error: any) {
       // Handle abort errors (timeout or manual cancellation)
+      // Use centralized error handler for consistent messages
       if (error.name === 'AbortError' || error.message?.includes('timeout')) {
         return {
           data: null,
           error: {
-            message: error.message || 'Request cancelled or timed out',
+            message: getNetworkErrorMessage(error),
             status: 0,
           },
         }
@@ -285,11 +267,13 @@ class ApiClient {
         return this.executeRequest<T>(url, config, attempt + 1)
       }
 
-      // Return error response
+      // Centralized fallback error message - secure and user-friendly
+      const networkErrorMessage = getNetworkErrorMessage(error)
+      
       return {
         data: null,
         error: {
-          message: error.message || 'Network error',
+          message: networkErrorMessage,
           status: 0,
         },
       }
@@ -298,6 +282,7 @@ class ApiClient {
 
   /**
    * Check if error is retryable
+   * Network error messages use centralized errorHandler utility
    */
   private isRetryableError(error: any): boolean {
     // Retry on network errors, not on 4xx client errors
@@ -326,9 +311,40 @@ class ApiClient {
   }
 
   /**
-   * GET request
+   * GET request with deduplication
+   * If the same request is already pending, returns the existing promise
+   * Note: Requests with abort signals are NOT deduplicated to preserve abort behavior
    */
   async get<T = any>(url: string, config?: RequestConfig): Promise<ApiResult<T>> {
+    // Don't deduplicate requests with abort signals - each signal needs independent control
+    const hasSignal = config?.signal !== undefined
+    
+    if (!hasSignal) {
+      const requestKey = this.getRequestKey(url, 'GET', config)
+      
+      // If same request is pending, return that promise
+      if (this.pendingRequests.has(requestKey)) {
+        return this.pendingRequests.get(requestKey)!
+      }
+      
+      const promise = this.executeRequest<T>(url, {
+        ...this.defaultConfig,
+        ...config,
+        method: 'GET',
+      })
+      
+      // Store promise for deduplication
+      this.pendingRequests.set(requestKey, promise)
+      
+      // Clean up after request completes
+      promise.finally(() => {
+        this.pendingRequests.delete(requestKey)
+      })
+      
+      return promise
+    }
+    
+    // Request has signal - execute directly without deduplication
     return this.executeRequest<T>(url, {
       ...this.defaultConfig,
       ...config,
@@ -338,19 +354,28 @@ class ApiClient {
 
   /**
    * POST request
+   * Supports both JSON and FormData
    */
   async post<T = any>(
     url: string,
     data?: any,
     config?: RequestConfig
   ): Promise<ApiResult<T>> {
+    // Handle FormData - don't stringify, pass as-is
+    // Content-Type will be set by browser with boundary
+    const body = data instanceof FormData 
+      ? data 
+      : data 
+        ? JSON.stringify(data) 
+        : undefined
+
     return this.executeRequest<T>(
       url,
       {
         ...this.defaultConfig,
         ...config,
         method: 'POST',
-        body: data ? JSON.stringify(data) : undefined,
+        body,
       }
     )
   }
@@ -414,7 +439,8 @@ export function isApiError<T>(result: ApiResult<T>): result is ApiErrorResponse 
 }
 
 // Export helper function to get error message
+// Uses centralized error handler for consistent fallback
 export function getApiErrorMessage(result: ApiErrorResponse): string {
-  return result.error.message || 'An error occurred'
+  return result.error.message || handleError('An error occurred')
 }
 

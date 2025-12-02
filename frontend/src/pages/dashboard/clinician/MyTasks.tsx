@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo, useCallback, memo } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
 import { CaseDetailModal } from './CaseDetailModal'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './MyTasks.css'
 
 interface TaskCase {
@@ -34,7 +35,7 @@ interface TaskCase {
 }
 
 type TaskStatus = 'todo' | 'in_progress' | 'revisions' | 'completed'
-type ViewMode = 'board' | 'list' | 'calendar'
+type ViewMode = 'board' | 'list'
 
 const TYPE_LABELS: Record<string, string> = {
   injury: 'Injury',
@@ -96,17 +97,16 @@ export function MyTasks() {
         setLoading(true)
         setError('')
 
-        const response = await fetch(`${API_BASE_URL}/api/clinician/cases?status=all&limit=500&_t=${Date.now()}`, {
-          method: 'GET',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-        })
+        const result = await apiClient.get<{ cases: TaskCase[] }>(
+          `${API_ROUTES.CLINICIAN.CASES}?status=all&limit=500&_t=${Date.now()}`,
+          { headers: { 'Cache-Control': 'no-cache' } }
+        )
 
-        if (!response.ok) {
-          throw new Error('Failed to fetch cases')
+        if (isApiError(result)) {
+          throw new Error(getApiErrorMessage(result) || 'Failed to fetch cases')
         }
 
-        const data = await response.json()
+        const data = result.data
 
         if (isMounted) {
           // Task statuses are managed in component state (session-only)
@@ -115,15 +115,13 @@ export function MyTasks() {
           
           // Fetch rehabilitation plans to get progress
           try {
-            const plansResponse = await fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans?status=all`, {
-              method: 'GET',
-              credentials: 'include',
-              headers: { 'Content-Type': 'application/json' },
-            })
+            const plansResult = await apiClient.get<{ plans: any[] }>(
+              `${API_ROUTES.CLINICIAN.REHABILITATION_PLANS}?status=all`
+            )
             
             let rehabPlansMap = new Map()
-            if (plansResponse.ok) {
-              const plansData = await plansResponse.json()
+            if (!isApiError(plansResult)) {
+              const plansData = plansResult.data
               plansData.plans?.forEach((plan: any) => {
                 rehabPlansMap.set(plan.exceptionId, plan.progress || 0)
               })
@@ -133,15 +131,28 @@ export function MyTasks() {
             const casesWithStatus = (data.cases || []).map((caseItem: any) => {
               let taskStatus: TaskStatus = 'todo'
               
+              // Get caseStatus from notes (if available)
+              const caseStatusFromNotes = (caseItem as any).caseStatus
+              
               // Check if case is closed (by status or caseStatus from notes)
               const isClosed = caseItem.status === 'CLOSED' || 
                                caseItem.status === 'closed' ||
-                               (caseItem as any).caseStatus === 'closed'
+                               caseStatusFromNotes === 'closed'
               
               // If closed, always set to completed
               if (isClosed) {
                 taskStatus = 'completed'
                 statuses[caseItem.id] = 'completed'
+              }
+              // BUSINESS RULE: If return_to_work, assign to "Revisions" (Return to Work) column
+              else if (caseStatusFromNotes === 'return_to_work' || caseItem.status === 'RETURN TO WORK') {
+                taskStatus = 'revisions'
+                statuses[caseItem.id] = 'revisions'
+              }
+              // BUSINESS RULE: If assessed, assign to "In Review" column
+              else if (caseStatusFromNotes === 'assessed' || caseItem.status === 'ASSESSED') {
+                taskStatus = 'in_progress'
+                statuses[caseItem.id] = 'in_progress'
               }
               // Check if status was saved
               else if (statuses[caseItem.id]) {
@@ -180,15 +191,28 @@ export function MyTasks() {
             const casesWithStatus = (data.cases || []).map((caseItem: any) => {
               let taskStatus: TaskStatus = 'todo'
               
+              // Get caseStatus from notes (if available)
+              const caseStatusFromNotes = (caseItem as any).caseStatus
+              
               // Check if case is closed (by status or caseStatus from notes)
               const isClosed = caseItem.status === 'CLOSED' || 
                                caseItem.status === 'closed' ||
-                               (caseItem as any).caseStatus === 'closed'
+                               caseStatusFromNotes === 'closed'
               
               // If closed, always set to completed
               if (isClosed) {
                 taskStatus = 'completed'
                 statuses[caseItem.id] = 'completed'
+              }
+              // BUSINESS RULE: If return_to_work, assign to "Revisions" (Return to Work) column
+              else if (caseStatusFromNotes === 'return_to_work' || caseItem.status === 'RETURN TO WORK') {
+                taskStatus = 'revisions'
+                statuses[caseItem.id] = 'revisions'
+              }
+              // BUSINESS RULE: If assessed, assign to "In Review" column
+              else if (caseStatusFromNotes === 'assessed' || caseItem.status === 'ASSESSED') {
+                taskStatus = 'in_progress'
+                statuses[caseItem.id] = 'in_progress'
               }
               else if (statuses[caseItem.id]) {
                 taskStatus = statuses[caseItem.id]
@@ -359,6 +383,280 @@ export function MyTasks() {
     }
   }, [updateTaskStatus])
 
+  // Format date for print
+  const formatDateForPrint = useCallback((dateString: string) => {
+    const date = new Date(dateString)
+    return date.toLocaleDateString('en-US', { 
+      month: '2-digit', 
+      day: '2-digit', 
+      year: 'numeric' 
+    })
+  }, [])
+
+  // Print function
+  const handlePrint = useCallback(() => {
+    const printWindow = window.open('', '_blank', 'width=800,height=600')
+    if (!printWindow) {
+      alert('Please allow popups to print this document')
+      return
+    }
+
+    const printDate = new Date().toLocaleString('en-US', {
+      month: '2-digit',
+      day: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+
+    // Group tasks by status for print
+    const tasksByStatus = {
+      todo: filteredAndSortedCases.filter(c => (c.taskStatus || 'todo') === 'todo'),
+      in_progress: filteredAndSortedCases.filter(c => (c.taskStatus || 'todo') === 'in_progress'),
+      revisions: filteredAndSortedCases.filter(c => (c.taskStatus || 'todo') === 'revisions'),
+      completed: filteredAndSortedCases.filter(c => (c.taskStatus || 'todo') === 'completed'),
+    }
+
+    const statusLabels: Record<string, string> = {
+      todo: 'To Do',
+      in_progress: 'In Review',
+      revisions: 'Return to Work',
+      completed: 'Completed',
+    }
+
+    // Generate task rows HTML
+    const generateTaskRows = (tasks: TaskCase[]) => {
+      if (tasks.length === 0) {
+        return '<div class="print-task-empty">No tasks</div>'
+      }
+      return tasks.map(task => {
+        const priorityStyle = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.MEDIUM
+        const progress = task.progress || (task.status === 'CLOSED' ? 100 : task.isInRehab ? 60 : 0)
+        return `
+          <div class="print-task-row">
+            <div class="print-task-main">
+              <div class="print-task-header-row">
+                <span class="print-task-case-number">${task.caseNumber}</span>
+                <span class="print-task-priority" style="background: ${priorityStyle.bg}; color: ${priorityStyle.color};">
+                  ${task.priority}
+                </span>
+              </div>
+              <div class="print-task-worker">Worker: ${task.workerName}</div>
+              <div class="print-task-details">
+                <span>Type: ${TYPE_LABELS[task.type] || task.type}</span>
+                <span>Team: ${task.teamName || 'N/A'}</span>
+                <span>Created: ${formatDateForPrint(task.createdAt)}</span>
+              </div>
+              ${progress > 0 ? `
+              <div class="print-task-progress">
+                <span>Progress: ${progress}%</span>
+                <div class="print-progress-bar">
+                  <div class="print-progress-fill" style="width: ${progress}%"></div>
+                </div>
+              </div>
+              ` : ''}
+            </div>
+          </div>
+        `
+      }).join('')
+    }
+
+    const printContent = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>My Tasks Report</title>
+          <style>
+            @media print {
+              @page {
+                margin: 1.5cm;
+                size: A4;
+              }
+            }
+            * {
+              box-sizing: border-box;
+            }
+            body {
+              font-family: 'Arial', 'Helvetica', sans-serif;
+              padding: 0;
+              margin: 0;
+              color: #000;
+              font-size: 12px;
+              line-height: 1.5;
+            }
+            .print-header {
+              border-bottom: 3px solid #000;
+              padding-bottom: 15px;
+              margin-bottom: 25px;
+            }
+            .print-header h1 {
+              margin: 0 0 8px 0;
+              font-size: 28px;
+              font-weight: bold;
+              color: #000;
+            }
+            .print-header p {
+              margin: 0;
+              color: #666;
+              font-size: 11px;
+            }
+            .print-stats {
+              margin-bottom: 25px;
+              padding: 12px;
+              background: #f5f5f5;
+              border-radius: 4px;
+            }
+            .print-stats-row {
+              display: flex;
+              gap: 20px;
+              flex-wrap: wrap;
+            }
+            .print-stat-item {
+              font-size: 12px;
+            }
+            .print-stat-label {
+              font-weight: bold;
+              color: #333;
+            }
+            .print-section {
+              margin-bottom: 30px;
+              page-break-inside: avoid;
+            }
+            .print-section h2 {
+              font-size: 16px;
+              font-weight: bold;
+              margin: 0 0 12px 0;
+              padding-bottom: 8px;
+              border-bottom: 2px solid #333;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              color: #000;
+            }
+            .print-task-row {
+              margin-bottom: 12px;
+              padding: 12px;
+              border: 1px solid #ddd;
+              border-radius: 4px;
+              background: #fafafa;
+              page-break-inside: avoid;
+            }
+            .print-task-main {
+              width: 100%;
+            }
+            .print-task-header-row {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              margin-bottom: 8px;
+            }
+            .print-task-case-number {
+              font-weight: bold;
+              font-size: 14px;
+              color: #000;
+            }
+            .print-task-priority {
+              padding: 4px 8px;
+              border-radius: 4px;
+              font-size: 10px;
+              font-weight: 600;
+              text-transform: uppercase;
+            }
+            .print-task-worker {
+              font-weight: 500;
+              color: #333;
+              margin-bottom: 6px;
+            }
+            .print-task-details {
+              display: flex;
+              gap: 16px;
+              font-size: 11px;
+              color: #666;
+              margin-bottom: 8px;
+              flex-wrap: wrap;
+            }
+            .print-task-progress {
+              margin-top: 8px;
+            }
+            .print-task-progress span {
+              font-size: 11px;
+              color: #666;
+              display: block;
+              margin-bottom: 4px;
+            }
+            .print-progress-bar {
+              width: 100%;
+              height: 8px;
+              background: #e0e0e0;
+              border-radius: 4px;
+              overflow: hidden;
+            }
+            .print-progress-fill {
+              height: 100%;
+              background: #3B82F6;
+              border-radius: 4px;
+              transition: width 0.3s;
+            }
+            .print-task-empty {
+              padding: 20px;
+              text-align: center;
+              color: #999;
+              font-style: italic;
+              border: 1px dashed #ddd;
+              border-radius: 4px;
+            }
+            @media print {
+              .no-print {
+                display: none !important;
+              }
+              body {
+                print-color-adjust: exact;
+                -webkit-print-color-adjust: exact;
+              }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="print-header">
+            <h1>My Tasks Report</h1>
+            <p>Printed on: ${printDate} | Total Tasks: ${filteredAndSortedCases.length}</p>
+          </div>
+
+          <div class="print-stats">
+            <div class="print-stats-row">
+              <div class="print-stat-item">
+                <span class="print-stat-label">To Do:</span> ${tasksByStatus.todo.length}
+              </div>
+              <div class="print-stat-item">
+                <span class="print-stat-label">In Review:</span> ${tasksByStatus.in_progress.length}
+              </div>
+              <div class="print-stat-item">
+                <span class="print-stat-label">Return to Work:</span> ${tasksByStatus.revisions.length}
+              </div>
+              <div class="print-stat-item">
+                <span class="print-stat-label">Completed:</span> ${tasksByStatus.completed.length}
+              </div>
+            </div>
+          </div>
+
+          ${Object.entries(tasksByStatus).map(([status, tasks]) => `
+            <div class="print-section">
+              <h2>${statusLabels[status]} (${tasks.length})</h2>
+              ${generateTaskRows(tasks)}
+            </div>
+          `).join('')}
+        </body>
+      </html>
+    `
+
+    printWindow.document.write(printContent)
+    printWindow.document.close()
+
+    setTimeout(() => {
+      printWindow.focus()
+      printWindow.print()
+    }, 500)
+  }, [filteredAndSortedCases, formatDateForPrint])
+
   if (loading) {
     return (
       <DashboardLayout>
@@ -386,9 +684,20 @@ export function MyTasks() {
           <div>
             <h1 className="tasks-title">My Tasks</h1>
             <p className="tasks-subtitle">Manage and track your tasks efficiently.</p>
-            <h2 style={{ marginTop: '8px', fontSize: '18px', fontWeight: 600, color: '#374151' }}>Case Details</h2>
           </div>
           <div className="tasks-header-actions">
+            <button
+              className="tasks-print-btn"
+              onClick={handlePrint}
+              title="Print tasks"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="6 9 6 2 18 2 18 9"></polyline>
+                <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+                <rect x="6" y="14" width="12" height="8"></rect>
+              </svg>
+              <span>Print</span>
+            </button>
             <div className="tasks-search">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="11" cy="11" r="8"></circle>
@@ -448,12 +757,6 @@ export function MyTasks() {
           >
             List
           </button>
-          <button
-            className={viewMode === 'calendar' ? 'active' : ''}
-            onClick={() => setViewMode('calendar')}
-          >
-            Calendar
-          </button>
         </div>
 
         {/* Kanban Board */}
@@ -470,7 +773,6 @@ export function MyTasks() {
                   <h3>To Do</h3>
                   <span className="kanban-count">{casesByStatus.paginated.todo.total}</span>
                 </div>
-                <button className="kanban-add-btn">+</button>
               </div>
               <div className="kanban-column-content">
                 {casesByStatus.paginated.todo.items.map((caseItem) => (
@@ -505,10 +807,9 @@ export function MyTasks() {
             >
               <div className="kanban-column-header">
                 <div>
-                  <h3>In Progress</h3>
+                  <h3>In Review</h3>
                   <span className="kanban-count">{casesByStatus.paginated.in_progress.total}</span>
                 </div>
-                <button className="kanban-add-btn">+</button>
               </div>
               <div className="kanban-column-content">
                 {casesByStatus.paginated.in_progress.items.map((caseItem) => (
@@ -535,7 +836,7 @@ export function MyTasks() {
               </div>
             </div>
 
-            {/* Revisions Column */}
+            {/* Return to Work Column (formerly Revisions) */}
             <div
               className="kanban-column"
               onDragOver={handleDragOver}
@@ -543,10 +844,9 @@ export function MyTasks() {
             >
               <div className="kanban-column-header">
                 <div>
-                  <h3>Revisions</h3>
+                  <h3>Return to Work</h3>
                   <span className="kanban-count">{casesByStatus.paginated.revisions.total}</span>
                 </div>
-                <button className="kanban-add-btn">+</button>
               </div>
               <div className="kanban-column-content">
                 {casesByStatus.paginated.revisions.items.map((caseItem) => (
@@ -584,7 +884,6 @@ export function MyTasks() {
                   <h3>Completed</h3>
                   <span className="kanban-count">{casesByStatus.paginated.completed.total}</span>
                 </div>
-                <button className="kanban-add-btn">+</button>
               </div>
               <div className="kanban-column-content">
                 {casesByStatus.paginated.completed.items.map((caseItem) => (
@@ -637,12 +936,6 @@ export function MyTasks() {
           </div>
         )}
 
-        {/* Calendar View - Placeholder */}
-        {viewMode === 'calendar' && (
-          <div className="tasks-calendar-view">
-            <p>Calendar view coming soon...</p>
-          </div>
-        )}
       </div>
 
       {/* Case Detail Modal */}
@@ -653,14 +946,13 @@ export function MyTasks() {
           // Refresh cases when status is updated
           try {
             // Fetch updated cases
-            const response = await fetch(`${API_BASE_URL}/api/clinician/cases?status=all&limit=500`, {
-              method: 'GET',
-              credentials: 'include',
-              headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-            })
+            const result = await apiClient.get<{ cases: TaskCase[] }>(
+              `${API_ROUTES.CLINICIAN.CASES}?status=all&limit=500`,
+              { headers: { 'Cache-Control': 'no-cache' } }
+            )
             
-            if (response.ok) {
-              const data = await response.json()
+            if (!isApiError(result)) {
+              const data = result.data
               // Use existing taskStatuses from state (session-only)
               const statuses = { ...taskStatuses }
               

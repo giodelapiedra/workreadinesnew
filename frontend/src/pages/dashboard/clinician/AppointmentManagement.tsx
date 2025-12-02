@@ -1,7 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { Avatar } from '../../../components/Avatar'
+import { formatTime, formatDateDisplay, normalizeTime } from '../../../shared/date'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { getTodayDateString } from '../../../shared/date'
 import './AppointmentManagement.css'
 
 interface Appointment {
@@ -11,6 +15,7 @@ interface Appointment {
   workerId: string
   workerName: string
   workerEmail: string
+  workerProfileImageUrl?: string | null
   teamName: string
   siteLocation: string
   appointmentDate: string
@@ -31,6 +36,7 @@ interface Case {
   workerId: string
   workerName: string
   workerEmail: string
+  workerProfileImageUrl?: string | null
   teamName: string
   siteLocation: string
   type: string
@@ -77,6 +83,8 @@ export function AppointmentManagement() {
   const [activeTab, setActiveTab] = useState<'today' | 'all' | 'week' | 'upcoming'>('all')
   const [statusFilter, setStatusFilter] = useState<'all' | 'confirmed' | 'pending' | 'declined'>('all')
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showEditModal, setShowEditModal] = useState(false)
+  const [editingAppointment, setEditingAppointment] = useState<Appointment | null>(null)
   const [formData, setFormData] = useState({
     case_id: '',
     appointment_date: '',
@@ -86,7 +94,21 @@ export function AppointmentManagement() {
     location: '',
     notes: '',
   })
+  const [editFormData, setEditFormData] = useState({
+    appointment_date: '',
+    appointment_time: '',
+    duration_minutes: 30,
+    appointment_type: 'consultation',
+    location: '',
+    notes: '',
+  })
   const [submitting, setSubmitting] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [showSuccessToast, setShowSuccessToast] = useState(false)
+  const [successMessage, setSuccessMessage] = useState('')
+  const [deleteConfirmAppointment, setDeleteConfirmAppointment] = useState<Appointment | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Fetch appointments
   const fetchAppointments = useCallback(async () => {
@@ -97,21 +119,20 @@ export function AppointmentManagement() {
       const dateFilter = activeTab === 'today' ? 'today' : activeTab === 'week' ? 'week' : activeTab === 'upcoming' ? 'upcoming' : 'all'
       const status = statusFilter === 'all' ? 'all' : statusFilter
 
-      const response = await fetch(
-        `${API_BASE_URL}/api/clinician/appointments?page=${currentPage}&limit=${itemsPerPage}&date=${dateFilter}&status=${status}&_t=${Date.now()}`,
-        {
-          method: 'GET',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-        }
+      const result = await apiClient.get<{
+        appointments: Appointment[]
+        summary: Summary
+        pagination: { totalPages: number; total: number }
+      }>(
+        `${API_ROUTES.CLINICIAN.APPOINTMENTS}?page=${currentPage}&limit=${itemsPerPage}&date=${dateFilter}&status=${status}&_t=${Date.now()}`,
+        { headers: { 'Cache-Control': 'no-cache' } }
       )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to fetch appointments' }))
-        throw new Error(errorData.error || 'Failed to fetch appointments')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch appointments')
       }
 
-      const data = await response.json()
+      const data = result.data
       setAppointments(data.appointments || [])
       setSummary(data.summary || {
         today: 0,
@@ -137,15 +158,10 @@ export function AppointmentManagement() {
     fetchAppointments()
     
     let mounted = true
-    fetch(`${API_BASE_URL}/api/clinician/cases?status=all&limit=100`, {
-      method: 'GET',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-    })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (mounted && data) {
-          setCases(data.cases || [])
+    apiClient.get<{ cases: Case[] }>(`${API_ROUTES.CLINICIAN.CASES}?status=all&limit=100`)
+      .then(result => {
+        if (mounted && !isApiError(result)) {
+          setCases(result.data.cases || [])
         }
       })
       .catch(() => {
@@ -164,6 +180,20 @@ export function AppointmentManagement() {
     }
   }, [activeTab])
 
+  // OPTIMIZATION: Show success toast with cleanup
+  const showToast = useCallback((message: string) => {
+    // Clear existing timeout
+    if (toastTimeoutRef.current) {
+      clearTimeout(toastTimeoutRef.current)
+    }
+    setSuccessMessage(message)
+    setShowSuccessToast(true)
+    toastTimeoutRef.current = setTimeout(() => {
+      setShowSuccessToast(false)
+      toastTimeoutRef.current = null
+    }, 3000)
+  }, [])
+
   const handleCreateAppointment = async () => {
     if (!formData.case_id || !formData.appointment_date || !formData.appointment_time) {
       setError('Please fill in all required fields')
@@ -174,17 +204,13 @@ export function AppointmentManagement() {
       setSubmitting(true)
       setError('')
 
-      const response = await fetch(`${API_BASE_URL}/api/clinician/appointments`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData),
-      })
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.CLINICIAN.APPOINTMENTS,
+        formData
+      )
 
-      const responseData = await response.json()
-
-      if (!response.ok) {
-        throw new Error(responseData.error || responseData.details || 'Failed to create appointment')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to create appointment')
       }
 
       setShowCreateModal(false)
@@ -200,6 +226,10 @@ export function AppointmentManagement() {
       // Switch to 'all' tab to see the new appointment and refresh
       setActiveTab('all')
       setCurrentPage(1)
+      
+      // Show success toast
+      showToast('Appointment created successfully')
+      
       // Wait a bit then refresh to ensure data is saved
       setTimeout(() => {
         fetchAppointments()
@@ -211,65 +241,174 @@ export function AppointmentManagement() {
     }
   }
 
-  const handleUpdateStatus = async (appointmentId: string, status: string) => {
+  // OPTIMIZATION: Memoize status update handler
+  const handleUpdateStatus = useCallback(async (appointmentId: string, status: string) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/clinician/appointments/${appointmentId}`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      })
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.CLINICIAN.APPOINTMENT(appointmentId),
+        { status }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to update appointment' }))
-        throw new Error(errorData.error || 'Failed to update appointment')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to update appointment')
+      }
+
+      // Show success toast for status updates
+      if (status === 'completed') {
+        showToast('Appointment marked as completed successfully')
+      } else if (status === 'confirmed') {
+        showToast('Appointment confirmed successfully')
       }
 
       fetchAppointments()
     } catch (err: any) {
+      console.error('Error updating appointment status:', err)
       setError(err.message || 'Failed to update appointment')
     }
-  }
+  }, [fetchAppointments, showToast])
 
-  const handleDeleteAppointment = async (appointmentId: string) => {
-    if (!confirm('Are you sure you want to delete this appointment?')) {
+  // OPTIMIZATION: Handle edit appointment - open modal with current data
+  const handleEditAppointment = useCallback((appointment: Appointment) => {
+    setEditingAppointment(appointment)
+    setEditFormData({
+      appointment_date: appointment.appointmentDate,
+      appointment_time: normalizeTime(appointment.appointmentTime),
+      duration_minutes: appointment.durationMinutes,
+      appointment_type: appointment.appointmentType,
+      location: appointment.location || '',
+      notes: appointment.notes || '',
+    })
+    setShowEditModal(true)
+    setError('')
+  }, [])
+
+  // OPTIMIZATION: Validate edit form data
+  const validateEditForm = useCallback((): string | null => {
+    if (!editFormData.appointment_date) {
+      return 'Appointment date is required'
+    }
+    if (!editFormData.appointment_time) {
+      return 'Appointment time is required'
+    }
+    if (editFormData.duration_minutes < 15 || editFormData.duration_minutes > 480) {
+      return 'Duration must be between 15 and 480 minutes'
+    }
+    if (!editFormData.appointment_type) {
+      return 'Appointment type is required'
+    }
+    return null
+  }, [editFormData])
+
+  // OPTIMIZATION: Handle update appointment with validation
+  const handleUpdateAppointment = useCallback(async () => {
+    if (!editingAppointment) return
+
+    // Validate form
+    const validationError = validateEditForm()
+    if (validationError) {
+      setError(validationError)
       return
     }
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/clinician/appointments/${appointmentId}`, {
-        method: 'DELETE',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-      })
+      setUpdating(true)
+      setError('')
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ error: 'Failed to delete appointment' }))
-        throw new Error(errorData.error || 'Failed to delete appointment')
+      // OPTIMIZATION: Normalize time format to HH:MM
+      const normalizedTime = normalizeTime(editFormData.appointment_time)
+
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.CLINICIAN.APPOINTMENT(editingAppointment.id),
+        {
+          appointment_date: editFormData.appointment_date,
+          appointment_time: normalizedTime,
+          duration_minutes: editFormData.duration_minutes,
+          appointment_type: editFormData.appointment_type,
+          location: editFormData.location || null,
+          notes: editFormData.notes || null,
+        }
+      )
+
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to update appointment')
       }
 
+      setShowEditModal(false)
+      setEditingAppointment(null)
+      
+      // Show success toast
+      showToast('Appointment updated successfully')
+      
       fetchAppointments()
     } catch (err: any) {
-      setError(err.message || 'Failed to delete appointment')
+      console.error('Error updating appointment:', err)
+      setError(err.message || 'Failed to update appointment')
+    } finally {
+      setUpdating(false)
     }
-  }
+  }, [editingAppointment, editFormData, validateEditForm, fetchAppointments, showToast])
 
-  // Helper functions
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })
-  }
+  // OPTIMIZATION: Memoize delete handler - open confirmation modal
+  const handleDeleteAppointment = useCallback((appointment: Appointment) => {
+    setDeleteConfirmAppointment(appointment)
+  }, [])
 
-  const formatTime = (timeStr: string) => {
-    const [hours, minutes] = timeStr.split(':')
-    const hour = parseInt(hours)
-    return `${hour % 12 || 12}:${minutes} ${hour >= 12 ? 'PM' : 'AM'}`
-  }
+  // Confirm delete action
+  const confirmDelete = useCallback(async () => {
+    if (!deleteConfirmAppointment) return
 
-  // Backend already filters, so we just use appointments directly
-  const today = new Date().toISOString().split('T')[0]
-  const todayAppointments = appointments.filter((apt) => apt.appointmentDate === today && apt.status === 'confirmed')
-  const pendingAppointments = appointments.filter((apt) => apt.appointmentDate === today && apt.status === 'pending')
-  const declinedAppointments = appointments.filter((apt) => apt.appointmentDate === today && apt.status === 'declined')
+    try {
+      setDeleting(true)
+      setError('')
+
+      const result = await apiClient.delete<{ message: string }>(
+        API_ROUTES.CLINICIAN.APPOINTMENT(deleteConfirmAppointment.id)
+      )
+
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to delete appointment')
+      }
+
+      // Show success toast
+      showToast('Appointment deleted successfully')
+      
+      setDeleteConfirmAppointment(null)
+      fetchAppointments()
+    } catch (err: any) {
+      console.error('Error deleting appointment:', err)
+      setError(err.message || 'Failed to delete appointment')
+      setDeleteConfirmAppointment(null)
+    } finally {
+      setDeleting(false)
+    }
+  }, [deleteConfirmAppointment, fetchAppointments, showToast])
+
+  // OPTIMIZATION: Memoize filtered appointments to prevent unnecessary recalculations
+  const today = useMemo(() => getTodayDateString(), [])
+  
+  const todayAppointments = useMemo(() => 
+    appointments.filter((apt) => apt.appointmentDate === today && apt.status === 'confirmed'),
+    [appointments, today]
+  )
+  
+  const pendingAppointments = useMemo(() => 
+    appointments.filter((apt) => apt.appointmentDate === today && apt.status === 'pending'),
+    [appointments, today]
+  )
+  
+  const declinedAppointments = useMemo(() => 
+    appointments.filter((apt) => apt.appointmentDate === today && apt.status === 'declined'),
+    [appointments, today]
+  )
+
+  // OPTIMIZATION: Cleanup toast timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current)
+      }
+    }
+  }, [])
 
   return (
     <DashboardLayout>
@@ -459,9 +598,15 @@ export function AppointmentManagement() {
                 <div className="appointment-header-card">
                   <div className="appointment-info">
                     <div className="worker-info">
-                      <div className="worker-avatar">
-                        {appointment.workerName.charAt(0).toUpperCase()}
-                      </div>
+                      <Avatar
+                        userId={appointment.workerId}
+                        profileImageUrl={appointment.workerProfileImageUrl}
+                        firstName={appointment.workerName.split(' ')[0]}
+                        lastName={appointment.workerName.split(' ').slice(1).join(' ')}
+                        email={appointment.workerEmail}
+                        size="sm"
+                        showTooltip
+                      />
                       <div>
                         <div className="worker-name">{appointment.workerName}</div>
                         <div className="case-number">{appointment.caseNumber}</div>
@@ -469,13 +614,26 @@ export function AppointmentManagement() {
                     </div>
                     <div className="appointment-time">
                       <div className="time-primary">{formatTime(appointment.appointmentTime)}</div>
-                      <div className="time-secondary">{formatDate(appointment.appointmentDate)}</div>
+                      <div className="time-secondary">{formatDateDisplay(appointment.appointmentDate)}</div>
                     </div>
                   </div>
                   <div className="appointment-actions">
                     <span className={`status-badge status-${appointment.status}`}>
                       {appointment.status.charAt(0).toUpperCase() + appointment.status.slice(1)}
                     </span>
+                    {appointment.status !== 'completed' && (
+                      <button
+                        className="btn-sm btn-edit"
+                        onClick={() => handleEditAppointment(appointment)}
+                        title="Edit appointment details"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                        </svg>
+                        Edit
+                      </button>
+                    )}
                     {appointment.status === 'pending' && (
                       <button
                         className="btn-sm btn-success"
@@ -494,7 +652,7 @@ export function AppointmentManagement() {
                     )}
                     <button
                       className="btn-sm btn-danger"
-                      onClick={() => handleDeleteAppointment(appointment.id)}
+                      onClick={() => handleDeleteAppointment(appointment)}
                     >
                       Delete
                     </button>
@@ -581,6 +739,117 @@ export function AppointmentManagement() {
           </div>
         )}
 
+        {/* Edit Appointment Modal */}
+        {showEditModal && editingAppointment && (
+          <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h2>Edit Appointment</h2>
+                <button className="modal-close" onClick={() => setShowEditModal(false)}>
+                  ×
+                </button>
+              </div>
+              <div className="modal-body">
+                <div className="form-group">
+                  <label>Worker</label>
+                  <input
+                    type="text"
+                    value={editingAppointment.workerName}
+                    disabled
+                    className="form-input-disabled"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Case Number</label>
+                  <input
+                    type="text"
+                    value={editingAppointment.caseNumber}
+                    disabled
+                    className="form-input-disabled"
+                  />
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Date *</label>
+                    <input
+                      type="date"
+                      value={editFormData.appointment_date}
+                      onChange={(e) => setEditFormData({ ...editFormData, appointment_date: e.target.value })}
+                      min={getTodayDateString()}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Time *</label>
+                    <input
+                      type="time"
+                      value={editFormData.appointment_time}
+                      onChange={(e) => setEditFormData({ ...editFormData, appointment_time: e.target.value })}
+                      required
+                    />
+                  </div>
+                </div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Duration (minutes) *</label>
+                    <input
+                      type="number"
+                      value={editFormData.duration_minutes}
+                      onChange={(e) => setEditFormData({ ...editFormData, duration_minutes: parseInt(e.target.value) || 30 })}
+                      min={15}
+                      max={480}
+                      step={15}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>Type *</label>
+                    <select
+                      value={editFormData.appointment_type}
+                      onChange={(e) => setEditFormData({ ...editFormData, appointment_type: e.target.value as any })}
+                      required
+                    >
+                      <option value="consultation">Consultation</option>
+                      <option value="follow_up">Follow-up</option>
+                      <option value="assessment">Assessment</option>
+                      <option value="review">Review</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="form-group">
+                  <label>Location</label>
+                  <input
+                    type="text"
+                    value={editFormData.location}
+                    onChange={(e) => setEditFormData({ ...editFormData, location: e.target.value })}
+                    placeholder="Appointment location"
+                    maxLength={500}
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Notes</label>
+                  <textarea
+                    value={editFormData.notes}
+                    onChange={(e) => setEditFormData({ ...editFormData, notes: e.target.value })}
+                    placeholder="Additional notes..."
+                    rows={4}
+                    maxLength={2000}
+                  />
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button className="btn-secondary" onClick={() => setShowEditModal(false)} disabled={updating}>
+                  Cancel
+                </button>
+                <button className="btn-primary" onClick={handleUpdateAppointment} disabled={updating}>
+                  {updating ? 'Updating...' : 'Update Appointment'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Create Appointment Modal */}
         {showCreateModal && (
           <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
@@ -614,7 +883,7 @@ export function AppointmentManagement() {
                       type="date"
                       value={formData.appointment_date}
                       onChange={(e) => setFormData({ ...formData, appointment_date: e.target.value })}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={getTodayDateString()}
                       required
                     />
                   </div>
@@ -683,6 +952,69 @@ export function AppointmentManagement() {
                   {submitting ? 'Creating...' : 'Create Appointment'}
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Delete Confirmation Modal */}
+        {deleteConfirmAppointment && (
+          <div className="modal-overlay" onClick={() => setDeleteConfirmAppointment(null)}>
+            <div className="modal-content delete-confirmation-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="delete-confirmation-header">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: '#EF4444' }}>
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <line x1="12" y1="8" x2="12" y2="12"></line>
+                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                </svg>
+                <h3>Delete Appointment?</h3>
+                <p>Are you sure you want to delete this appointment? This action cannot be undone.</p>
+              </div>
+              <div className="delete-confirmation-info">
+                <div className="delete-confirmation-detail">
+                  <span className="label">Worker:</span>
+                  <span className="value">{deleteConfirmAppointment.workerName}</span>
+                </div>
+                <div className="delete-confirmation-detail">
+                  <span className="label">Case Number:</span>
+                  <span className="value">{deleteConfirmAppointment.caseNumber}</span>
+                </div>
+                <div className="delete-confirmation-detail">
+                  <span className="label">Date:</span>
+                  <span className="value">{formatDateDisplay(deleteConfirmAppointment.appointmentDate)}</span>
+                </div>
+                <div className="delete-confirmation-detail">
+                  <span className="label">Time:</span>
+                  <span className="value">{formatTime(deleteConfirmAppointment.appointmentTime)}</span>
+                </div>
+              </div>
+              <div className="delete-confirmation-actions">
+                <button
+                  className="btn-secondary"
+                  onClick={() => setDeleteConfirmAppointment(null)}
+                  disabled={deleting}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn-danger"
+                  onClick={confirmDelete}
+                  disabled={deleting}
+                >
+                  {deleting ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Success Toast Notification */}
+        {showSuccessToast && (
+          <div className="success-toast">
+            <div className="success-toast-content">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              <span>{successMessage}</span>
             </div>
           </div>
         )}

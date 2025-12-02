@@ -3,19 +3,35 @@
   display: flex;
   background: #FFFFFF;
   position: relative;
+  /* Ensure no blur effects on the layout itself */
+  filter: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
-/* Mobile Overlay */
+/* When sidebar is open on mobile, ensure background content is not blurred */
+.dashboard-layout:has(.sidebar.mobile.open) {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Mobile Overlay - No dark overlay on mobile, transparent only */
 .sidebar-overlay {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(15, 23, 42, 0.4);
-  backdrop-filter: blur(2px);
+  background: transparent;
   z-index: 1000;
   animation: fadeIn 0.2s ease;
+  /* Explicitly disable any blur effects - CRITICAL: backdrop-filter causes blur on content behind */
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  filter: none !important;
+  /* Prevent any blur inheritance */
+  will-change: opacity;
 }
 
 @keyframes fadeIn {
@@ -45,6 +61,27 @@
 /* Mobile: content always full width */
 .dashboard-content.mobile {
   margin-left: 0;
+  /* Ensure no blur effects on mobile */
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* When sidebar is open on mobile, ensure content behind is not blurred */
+.dashboard-content.mobile:has(+ .sidebar.mobile.open),
+.dashboard-layout:has(.sidebar.mobile.open) .dashboard-content,
+.dashboard-layout:has(.sidebar.mobile.open) .dashboard-content * {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Direct selector for when sidebar has open mobile classes */
+.sidebar.mobile.open ~ .dashboard-content,
+.sidebar.mobile.open ~ * .dashboard-content {
+  filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 /* Mobile Styles */
@@ -53,6 +90,18 @@
     margin-left: 0;
     padding: 16px;
     margin-top: 56px;
+    /* Ensure no blur effects on mobile */
+    filter: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  
+  /* Ensure body and html are not blurred when sidebar is open */
+  body:has(.dashboard-layout .sidebar.mobile.open),
+  html:has(.dashboard-layout .sidebar.mobile.open) {
+    filter: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
   }
 }
 

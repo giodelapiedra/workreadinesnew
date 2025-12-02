@@ -1,0 +1,212 @@
+/**
+ * AiAnalysis Component Styles
+ * Clean, minimal, professional design
+ */
+
+/* Main section */
+.ai-analysis-section {
+  margin-bottom: 32px;
+}
+
+.ai-analysis-header-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #0F172A;
+}
+
+.ai-analysis-header-content svg {
+  flex-shrink: 0;
+  stroke: #3B82F6;
+}
+
+.ai-analysis-container {
+  padding: 16px 0;
+}
+
+.ai-analysis-content {
+  background: #F8FAFC;
+  border-radius: 8px;
+  padding: 24px;
+}
+
+/* Risk Level Badge */
+.ai-analysis-risk-badge-container {
+  margin-bottom: 16px;
+}
+
+.ai-analysis-risk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ai-analysis-risk-badge svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+/* Section Blocks */
+.ai-analysis-section-block {
+  margin-bottom: 16px;
+}
+
+.ai-analysis-section-block:last-child {
+  margin-bottom: 0;
+}
+
+.ai-analysis-section-title {
+  margin: 0 0 10px 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ai-analysis-summary-text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #0F172A;
+}
+
+/* Details Grid */
+.ai-analysis-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.ai-analysis-detail-card {
+  padding: 12px;
+  background: #FFFFFF;
+  border-radius: 6px;
+}
+
+.ai-analysis-detail-label {
+  display: block;
+  font-size: 11px;
+  color: #94A3B8;
+  text-transform: uppercase;
+  font-weight: 500;
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+}
+
+.ai-analysis-detail-value {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0F172A;
+}
+
+/* Recommendations List */
+.ai-analysis-recommendations-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-analysis-recommendation-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  background: #FFFFFF;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #0F172A;
+}
+
+.ai-analysis-recommendation-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #3B82F6;
+  color: #FFFFFF;
+  font-size: 11px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .ai-analysis-content {
+    padding: 20px;
+  }
+
+  .ai-analysis-details-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-analysis-summary-text {
+    font-size: 14px;
+  }
+
+  .ai-analysis-recommendation-item {
+    padding: 10px;
+    font-size: 13px;
+  }
+}
+
+/* Print Styles */
+@media print {
+  .ai-analysis-section {
+    page-break-inside: avoid;
+    break-inside: avoid;
+    margin-bottom: 20px;
+  }
+
+  .ai-analysis-content {
+    background: #FFFFFF;
+    padding: 20px;
+  }
+
+  .ai-analysis-risk-badge {
+    border: 1px solid #000;
+  }
+
+  .ai-analysis-section-title {
+    color: #000;
+  }
+
+  .ai-analysis-detail-card,
+  .ai-analysis-recommendation-item {
+    background: #FFFFFF;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  .ai-analysis-recommendation-number {
+    background: #000 !important;
+    color: #FFF !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .ai-analysis-summary-text,
+  .ai-analysis-detail-value,
+  .ai-analysis-recommendation-item {
+    color: #000;
+  }
+
+  .ai-analysis-detail-label {
+    color: #666;
+  }
+}

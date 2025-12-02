@@ -3,7 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
 import { API_BASE_URL } from '../../../config/api'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import { PROTECTED_ROUTES } from '../../../config/routes'
+import { formatDate } from '../../../shared/date'
+import { buildUrl } from '../../../utils/queryBuilder'
 import {
   Area,
   AreaChart,
@@ -138,19 +141,25 @@ export function SupervisorAnalytics() {
   const itemsPerPage = 10
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null)
   
-  // Date filters
-  const [startDate, setStartDate] = useState(() => {
+  // Date filters - Initialize with "this month" by default
+  // Use formatDate to avoid timezone issues (uses local time, not UTC)
+  const getThisMonthDates = () => {
     const today = new Date()
     const firstDay = new Date(today.getFullYear(), today.getMonth(), 1)
-    return firstDay.toISOString().split('T')[0]
-  })
-  const [endDate, setEndDate] = useState(() => {
-    return new Date().toISOString().split('T')[0]
-  })
+    return {
+      start: formatDate(firstDay),
+      end: formatDate(today)
+    }
+  }
+
+  const initialDates = getThisMonthDates()
+  const [startDate, setStartDate] = useState(initialDates.start)
+  const [endDate, setEndDate] = useState(initialDates.end)
   const [datePreset, setDatePreset] = useState<'custom' | 'thisWeek' | 'thisMonth' | 'last30Days'>('thisMonth')
 
+
   // Date preset handlers
-  const setDatePresetHandler = (preset: 'thisWeek' | 'thisMonth' | 'last30Days' | 'custom') => {
+  const setDatePresetHandler = useCallback((preset: 'thisWeek' | 'thisMonth' | 'last30Days' | 'custom') => {
     setDatePreset(preset)
     const today = new Date()
     let start: Date, end: Date
@@ -175,9 +184,10 @@ export function SupervisorAnalytics() {
         return
     }
 
-    setStartDate(start.toISOString().split('T')[0])
-    setEndDate(end.toISOString().split('T')[0])
-  }
+    // Use formatDate to avoid timezone conversion issues
+    setStartDate(formatDate(start))
+    setEndDate(formatDate(end))
+  }, [])
 
   const fetchAnalytics = useCallback(async () => {
     try {
@@ -189,18 +199,25 @@ export function SupervisorAnalytics() {
       const now = Date.now()
 
       // Return cached data if still fresh
+      // NOTE: Cache is cleared when date filters change, so this should always fetch fresh data
       if (cached && (now - cached.timestamp) < CACHE_TTL) {
-        setAnalyticsData(cached.data)
-        setLoading(false)
-        return
+        // Validate cached data structure
+        if (cached.data && typeof cached.data === 'object' && Array.isArray(cached.data.teamLeaderPerformance)) {
+          setAnalyticsData(cached.data)
+          setLoading(false)
+          return
+        } else {
+          // Invalid cache, clear it and fetch fresh
+          cache.delete(cacheKey)
+        }
       }
 
-      const params = new URLSearchParams({
+      const analyticsUrl = buildUrl(API_ROUTES.SUPERVISOR.ANALYTICS, {
         startDate,
         endDate,
       })
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/analytics?${params}`, {
+      const response = await fetch(`${API_BASE_URL}${analyticsUrl}`, {
         method: 'GET',
         credentials: 'include',
         headers: {
@@ -210,10 +227,17 @@ export function SupervisorAnalytics() {
 
       if (!response.ok) {
         const errorData = await response.json()
+        console.error('[SupervisorAnalytics] API error:', errorData)
         throw new Error(errorData.error || 'Failed to fetch analytics data')
       }
 
       const data = await response.json()
+      
+      // Ensure data structure exists even if empty
+      if (!data || typeof data !== 'object') {
+        console.error('[SupervisorAnalytics] Invalid data structure received')
+        throw new Error('Invalid data structure received from server')
+      }
       
       // Cache the response
       cache.set(cacheKey, { data, timestamp: now })
@@ -228,7 +252,7 @@ export function SupervisorAnalytics() {
       
       setAnalyticsData(data)
     } catch (err: any) {
-      console.error('Error fetching analytics:', err)
+      console.error('[SupervisorAnalytics] Error fetching analytics:', err)
       setError(err.message || 'Failed to load analytics')
     } finally {
       setLoading(false)
@@ -245,28 +269,26 @@ export function SupervisorAnalytics() {
     // Backend returns overallReadiness as percentages (0-100)
     const { green, amber, red } = analyticsData.summary.overallReadiness
     
-    // Calculate total count from readinessDistribution for display
-    const totalCount = analyticsData.readinessDistribution.green + 
-                       analyticsData.readinessDistribution.amber + 
-                       analyticsData.readinessDistribution.red
+    // Use actual counts from readinessDistribution (now matches date range totals)
+    const { green: greenCount, amber: amberCount, red: redCount } = analyticsData.readinessDistribution
     
     return [
       { 
         name: 'Green', 
         value: green, 
-        count: Math.round((green / 100) * totalCount),
+        count: greenCount,
         color: COLORS.green 
       },
       { 
         name: 'Amber', 
         value: amber, 
-        count: Math.round((amber / 100) * totalCount),
+        count: amberCount,
         color: COLORS.amber 
       },
       { 
         name: 'Red', 
         value: red, 
-        count: Math.round((red / 100) * totalCount),
+        count: redCount,
         color: COLORS.red 
       },
     ].filter(item => item.value > 0)
@@ -312,8 +334,11 @@ export function SupervisorAnalytics() {
   const sortedAndPaginatedTeamLeaders = useMemo(() => {
     if (!analyticsData) return []
     
+    // Ensure teamLeaderPerformance exists and is an array
+    const teamLeaderPerformance = analyticsData.teamLeaderPerformance || []
+    
     // Create a copy for sorting
-    let sorted = [...analyticsData.teamLeaderPerformance]
+    let sorted = [...teamLeaderPerformance]
     
     // Apply sorting if configured
     if (sortConfig) {
@@ -399,6 +424,23 @@ export function SupervisorAnalytics() {
     return null
   })
 
+  const ReadinessTooltip = memo(({ active, payload }: any) => {
+    if (active && payload && payload.length) {
+      const data = payload[0].payload
+      return (
+        <div className="custom-tooltip">
+          <p className="tooltip-label" style={{ fontWeight: 'bold', marginBottom: '8px' }}>
+            {data.name}
+          </p>
+          <p style={{ color: data.color, margin: '4px 0' }}>
+            {data.value}% ({data.count} {data.count === 1 ? 'worker' : 'workers'})
+          </p>
+        </div>
+      )
+    }
+    return null
+  })
+
   if (loading) {
     return (
       <DashboardLayout>
@@ -430,13 +472,16 @@ export function SupervisorAnalytics() {
         <div className="supervisor-analytics">
           <div className="analytics-error">
             <p>No data available</p>
+            <p style={{ fontSize: '12px', color: '#666', marginTop: '8px' }}>
+              {loading ? 'Loading...' : 'Please check your date filters or try refreshing the page.'}
+            </p>
           </div>
         </div>
       </DashboardLayout>
     )
   }
 
-  const totalOverallReadinessCount = overallReadinessData.reduce((sum, item) => sum + (item.count || item.value), 0)
+  const totalOverallReadinessCount = overallReadinessData.reduce((sum, item) => sum + item.count, 0)
 
   return (
     <DashboardLayout>
@@ -445,11 +490,10 @@ export function SupervisorAnalytics() {
         <header className="analytics-header">
           <div className="header-top">
             <div className="header-left">
-              <h1 className="analytics-title">Analytics</h1>
-              <p className="analytics-subtitle">Comprehensive overview of all teams and team leaders</p>
+              <h1 className="analytics-title">Analytics Dashboard</h1>
               {formattedDateRange && (
                 <p className="analytics-date-range">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ display: 'inline-block', marginRight: '4px' }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
                     <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
                     <line x1="16" y1="2" x2="16" y2="6"></line>
                     <line x1="8" y1="2" x2="8" y2="6"></line>
@@ -497,6 +541,7 @@ export function SupervisorAnalytics() {
                   setDatePreset('custom')
                 }}
                 className="date-input"
+                aria-label="Start date"
               />
               <span className="date-separator">to</span>
               <input
@@ -507,6 +552,7 @@ export function SupervisorAnalytics() {
                   setDatePreset('custom')
                 }}
                 className="date-input"
+                aria-label="End date"
               />
             </div>
           </div>
@@ -588,7 +634,6 @@ export function SupervisorAnalytics() {
           <div className="chart-card">
             <div className="chart-header">
               <h3 className="chart-title">Exception Types</h3>
-              <p className="chart-subtitle">Exceptions by type in date range</p>
             </div>
             <div className="chart-content">
               {exceptionTypeData.length === 0 ? (
@@ -647,7 +692,6 @@ export function SupervisorAnalytics() {
                   </svg>
                 </span>
               </h3>
-              <p className="chart-subtitle">Average readiness percentage (date range)</p>
             </div>
             <div className="chart-content">
               <div className="donut-chart-container">
@@ -666,17 +710,17 @@ export function SupervisorAnalytics() {
                         <Cell key={`cell-${index}`} fill={entry.color} />
                       ))}
                     </Pie>
-                    <Tooltip />
+                    <Tooltip content={<ReadinessTooltip />} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="donut-chart-center">
                   {overallReadinessData.length > 0 ? (
                     <>
                       <span className="donut-total">
-                        {overallReadinessData.reduce((sum, item) => sum + item.value, 0)}%
+                        {totalOverallReadinessCount}
                       </span>
                       <span className="donut-subtotal">
-                        {totalOverallReadinessCount > 0 ? `${totalOverallReadinessCount} workers` : ''}
+                        {totalOverallReadinessCount === 1 ? 'worker' : 'workers'}
                       </span>
                     </>
                   ) : (
@@ -700,7 +744,6 @@ export function SupervisorAnalytics() {
           <div className="chart-card chart-card-wide">
             <div className="chart-header">
               <h3 className="chart-title">Team Leader Performance</h3>
-              <p className="chart-subtitle">Completion rates by team</p>
             </div>
             <div className="chart-content">
               <ResponsiveContainer width="100%" height={300}>
@@ -731,7 +774,6 @@ export function SupervisorAnalytics() {
           <div className="chart-card chart-card-wide">
             <div className="chart-header">
               <h3 className="chart-title">Daily Trends</h3>
-              <p className="chart-subtitle">Check-in completion over time</p>
             </div>
             <div className="chart-content">
               <ResponsiveContainer width="100%" height={300}>
@@ -814,10 +856,9 @@ export function SupervisorAnalytics() {
           <div className="table-header">
             <div>
               <h3 className="table-title">Team Leader Performance</h3>
-              <p className="table-subtitle">Detailed metrics for each team leader</p>
             </div>
             <div className="table-summary">
-              Showing {sortedAndPaginatedTeamLeaders.length} of {analyticsData.teamLeaderPerformance.length} team leaders
+              {sortedAndPaginatedTeamLeaders.length} of {analyticsData.teamLeaderPerformance.length} team leaders
             </div>
           </div>
           <div className="table-container">
@@ -961,7 +1002,6 @@ export function SupervisorAnalytics() {
         {analyticsData.topTeamsByCases && analyticsData.topTeamsByCases.length > 0 && (
           <div className="priority-teams-card">
             <div className="priority-header">
-              <div>
                 <h3 className="priority-title">
                   Top Teams by Cases
                   <span className="tooltip-icon" title="Teams with the most cases (worker exceptions) submitted by site supervisor in the selected date range">
@@ -972,8 +1012,6 @@ export function SupervisorAnalytics() {
                     </svg>
                   </span>
                 </h3>
-                <p className="priority-subtitle">Teams with the most cases submitted by site supervisor</p>
-              </div>
             </div>
             <div className="priority-teams-grid">
               {analyticsData.topTeamsByCases.map((team) => (

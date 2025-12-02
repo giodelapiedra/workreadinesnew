@@ -1,0 +1,45 @@
+/* Case Detail Page - Full Page Layout (Optimized, No Modal Styling) */
+@import './CaseDetailModal.css';
+
+.case-detail-page-container {
+  padding: 0;
+  min-height: calc(100vh - 64px);
+  background: transparent;
+  width: 100%;
+}
+
+/* Remove all modal-like styling for full page */
+.case-detail-page-container .case-detail-modal {
+  max-width: 100%;
+  max-height: none;
+  overflow-y: visible;
+  margin: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+  width: 100%;
+}
+
+.case-detail-page-container .case-detail-header {
+  border-radius: 0;
+  background: #FFFFFF;
+  border-bottom: 1px solid #E2E8F0;
+  padding: 20px 24px;
+}
+
+.case-detail-page-container .case-detail-content {
+  padding: 24px;
+  background: transparent;
+}
+
+.case-detail-page-container .case-info-section {
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+}
+
+.case-detail-page-container .case-progress-section {
+  background: #FFFFFF;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+}

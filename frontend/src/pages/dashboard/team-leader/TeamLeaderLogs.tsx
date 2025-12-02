@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './TeamLeaderLogs.css'
 
 interface LoginLog {
@@ -77,18 +78,13 @@ export function TeamLeaderLogs() {
       setVerifying(true)
       setVerifyError('')
 
-      const response = await fetch(`${API_BASE_URL}/api/teams/logs/verify-password`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ password }),
-      })
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.TEAMS.LOGS_VERIFY_PASSWORD,
+        { password }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Invalid password')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Invalid password')
       }
 
       // Store verification with timestamp
@@ -120,22 +116,18 @@ export function TeamLeaderLogs() {
         limit: itemsPerPage.toString(),
       })
 
-      const response = await fetch(`${API_BASE_URL}/api/teams/logs?${params}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-        },
-      })
+      const result = await apiClient.get<LogsResponse>(
+        `${API_ROUTES.TEAMS.LOGS}?${params}`,
+        {
+          headers: { 'Cache-Control': 'no-cache' },
+        }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch logs')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch logs')
       }
 
-      const data: LogsResponse = await response.json()
-      setLogsData(data)
+      setLogsData(result.data)
     } catch (err: any) {
       console.error('Error fetching logs:', err)
       setError(err.message || 'Failed to load logs')
@@ -262,12 +254,7 @@ export function TeamLeaderLogs() {
             className="refresh-button"
             title="Refresh logs"
           >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="23 4 23 10 17 10"></polyline>
-              <polyline points="1 20 1 14 7 14"></polyline>
-              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
-            </svg>
-            <span>Refresh</span>
+            Refresh
           </button>
         </div>
 
@@ -318,12 +305,16 @@ export function TeamLeaderLogs() {
                       </td>
                       <td>
                         <div className="device-cell">
-                          <span className="device-text">
+                          <span className={`device-badge ${log.userAgent ? (
+                            log.userAgent.includes('Mobile') || log.userAgent.includes('Android') || log.userAgent.includes('iPhone') 
+                              ? 'device-mobile' 
+                              : 'device-desktop'
+                          ) : 'device-unknown'}`}>
                             {log.userAgent ? (
                               log.userAgent.includes('Mobile') || log.userAgent.includes('Android') || log.userAgent.includes('iPhone') 
-                                ? '📱 Mobile' 
-                                : '💻 Desktop'
-                            ) : 'N/A'}
+                                ? 'Mobile' 
+                                : 'Desktop'
+                            ) : 'Unknown'}
                           </span>
                         </div>
                       </td>

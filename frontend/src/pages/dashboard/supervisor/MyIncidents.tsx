@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { PROTECTED_ROUTES } from '../../../config/routes'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './MyIncidents.css'
 
 interface Incident {
@@ -25,6 +28,8 @@ interface Incident {
   approvedAt: string | null
   whsApprovedBy: string | null
   whsApprovedAt: string | null
+  returnToWorkDutyType: string | null
+  returnToWorkDate: string | null
   createdAt: string
   updatedAt: string
 }
@@ -36,6 +41,7 @@ interface IncidentData {
 }
 
 export function MyIncidents() {
+  const navigate = useNavigate()
   const [incidents, setIncidents] = useState<IncidentData>({
     in_progress: [],
     rehabilitation: [],
@@ -44,8 +50,6 @@ export function MyIncidents() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null)
-  const [showViewModal, setShowViewModal] = useState(false)
   
   // Date range state - default to last 6 months
   const today = new Date()
@@ -64,20 +68,15 @@ export function MyIncidents() {
         endDate,
       })
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/my-incidents?${params.toString()}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.get<{ incidents: IncidentData }>(
+        `${API_ROUTES.SUPERVISOR.MY_INCIDENTS}?${params.toString()}`
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch incidents')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch incidents')
       }
 
-      const data = await response.json()
+      const data = result.data
       const allIncidents: IncidentData = data.incidents || { in_progress: [], rehabilitation: [], completed: [] }
 
       const filterByClinicianApproval = (group: Incident[]) =>
@@ -238,8 +237,7 @@ export function MyIncidents() {
   }
 
   const handleViewIncident = (incident: Incident) => {
-    setSelectedIncident(incident)
-    setShowViewModal(true)
+    navigate(`${PROTECTED_ROUTES.SUPERVISOR.MY_INCIDENTS}/${incident.id}`)
   }
 
   const IncidentTableRow = ({ incident }: { incident: Incident }) => {
@@ -505,119 +503,6 @@ export function MyIncidents() {
               )}
             </div>
           </>
-        )}
-
-        {/* View Incident Modal */}
-        {showViewModal && selectedIncident && (
-          <div className="modal-overlay" onClick={() => setShowViewModal(false)}>
-            <div className="modal-content incident-modal" onClick={(e) => e.stopPropagation()}>
-              <div className="modal-header">
-                <div>
-                  <h2>Incident Details</h2>
-                  <p className="modal-subtitle">#{selectedIncident.id.substring(0, 8).toUpperCase()}</p>
-                </div>
-                <button className="modal-close" onClick={() => setShowViewModal(false)}>
-                  ×
-                </button>
-              </div>
-              <div className="modal-body">
-                <div className="incident-detail-grid">
-                  <div className="detail-section">
-                    <h3 className="detail-section-title">Worker Information</h3>
-                    <div className="detail-item">
-                      <span className="detail-label">Name:</span>
-                      <span className="detail-value">{selectedIncident.workerName}</span>
-                    </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Email:</span>
-                      <span className="detail-value">{selectedIncident.workerEmail}</span>
-                    </div>
-                  </div>
-
-                  <div className="detail-section">
-                    <h3 className="detail-section-title">Incident Details</h3>
-                    <div className="detail-item">
-                      <span className="detail-label">Type:</span>
-                      <span className="detail-value">{getTypeLabel(selectedIncident.type)}</span>
-                    </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Status:</span>
-                      <span className="detail-value">{getCaseStatusLabel(selectedIncident.caseStatus)}</span>
-                    </div>
-                    <div className="detail-item">
-                      <span className="detail-label">Start Date:</span>
-                      <span className="detail-value">{formatDate(selectedIncident.startDate)}</span>
-                    </div>
-                    {selectedIncident.endDate && (
-                      <div className="detail-item">
-                        <span className="detail-label">End Date:</span>
-                        <span className="detail-value">{formatDate(selectedIncident.endDate)}</span>
-                      </div>
-                    )}
-                    {selectedIncident.reason && (
-                      <div className="detail-item">
-                        <span className="detail-label">Reason:</span>
-                        <span className="detail-value">{selectedIncident.reason}</span>
-                      </div>
-                    )}
-                    {selectedIncident.whsApprovedBy && (
-                      <div className="detail-item">
-                        <span className="detail-label">Approved by WHS:</span>
-                        <span className="detail-value">{selectedIncident.whsApprovedBy}</span>
-                      </div>
-                    )}
-                    {selectedIncident.approvedByClinician && (
-                      <div className="detail-item">
-                        <span className="detail-label">Approved by Clinician:</span>
-                        <span className="detail-value">{selectedIncident.approvedByClinician}</span>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="detail-section">
-                    <h3 className="detail-section-title">Team Information</h3>
-                    <div className="detail-item">
-                      <span className="detail-label">Team:</span>
-                      <span className="detail-value">{selectedIncident.teamName}</span>
-                    </div>
-                    {selectedIncident.siteLocation && (
-                      <div className="detail-item">
-                        <span className="detail-label">Site:</span>
-                        <span className="detail-value">{selectedIncident.siteLocation}</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {(selectedIncident.assignedToWhs || selectedIncident.clinicianId || selectedIncident.whsApprovedBy || selectedIncident.approvedByClinician) && (
-                    <div className="detail-section">
-                      <h3 className="detail-section-title">Assignment</h3>
-                      {(selectedIncident.clinicianId || selectedIncident.approvedByClinician) && (
-                        <div className="detail-item">
-                          <span className="detail-label">Assigned to Clinician:</span>
-                          <span className="detail-value">
-                            {selectedIncident.approvedByClinician || 'Clinician assigned'}
-                          </span>
-                        </div>
-                      )}
-                      {(selectedIncident.assignedToWhs || selectedIncident.whsApprovedBy) && (
-                        <div className="detail-item">
-                          <span className="detail-label">Assigned to WHS:</span>
-                          <span className="detail-value">
-                            {selectedIncident.whsApprovedBy || 'WHS team assigned'}
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="modal-footer">
-                <button className="modal-close-btn" onClick={() => setShowViewModal(false)}>
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
         )}
       </div>
     </DashboardLayout>

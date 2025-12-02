@@ -2,8 +2,9 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
 import { PROTECTED_ROUTES } from '../../../config/routes'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import {
   AreaChart,
   Area,
@@ -96,6 +97,11 @@ export function WhsAnalytics() {
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const fetchAnalytics = useCallback(async () => {
+    // Abort previous request if still pending
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
+
     const abortController = new AbortController()
     abortControllerRef.current = abortController
 
@@ -103,46 +109,53 @@ export function WhsAnalytics() {
       setLoading(true)
       setError('')
 
-      const response = await fetch(`${API_BASE_URL}/api/whs/analytics?range=${timeRange}&_t=${Date.now()}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-        signal: abortController.signal,
-      })
+      const result = await apiClient.get<AnalyticsData>(
+        `${API_ROUTES.WHS.ANALYTICS}?range=${timeRange}&_t=${Date.now()}`,
+        {
+          headers: { 'Cache-Control': 'no-cache' },
+          signal: abortController.signal,
+        }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch analytics data')
+      // Check if request was aborted before processing
+      if (abortController.signal.aborted) {
+        return
       }
 
-      const analyticsData = await response.json()
-      setData(analyticsData)
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch analytics data')
+      }
+
+      setData(result.data)
       setLastUpdated(new Date())
     } catch (err: any) {
-      if (err.name === 'AbortError') return
+      // Don't show error if request was aborted
+      if (err.name === 'AbortError' || abortController.signal.aborted) {
+        return
+      }
       console.error('Error fetching analytics:', err)
       setError(err.message || 'Failed to load analytics data')
     } finally {
-      setLoading(false)
+      // Only update loading state if request wasn't aborted
+      if (!abortController.signal.aborted) {
+        setLoading(false)
+      }
     }
   }, [timeRange])
 
   const fetchClinicianPerformance = useCallback(async () => {
     try {
       setLoadingPerformance(true)
-      const response = await fetch(`${API_BASE_URL}/api/whs/clinicians/performance?_t=${Date.now()}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-      })
+      const result = await apiClient.get<{ clinicians: any[] }>(
+        `${API_ROUTES.WHS.CLINICIANS_PERFORMANCE}?_t=${Date.now()}`,
+        { headers: { 'Cache-Control': 'no-cache' } }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch clinician performance')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch clinician performance')
       }
 
-      const performanceData = await response.json()
-      setClinicianPerformance(performanceData.clinicians || [])
+      setClinicianPerformance(result.data.clinicians || [])
     } catch (err: any) {
       console.error('Error fetching clinician performance:', err)
       // Don't show error banner for performance, just log it
@@ -154,12 +167,15 @@ export function WhsAnalytics() {
   useEffect(() => {
     fetchAnalytics()
     fetchClinicianPerformance()
+    
     return () => {
+      // Only abort on unmount, not on dependency changes
       if (abortControllerRef.current) {
         abortControllerRef.current.abort()
+        abortControllerRef.current = null
       }
     }
-  }, [fetchAnalytics, fetchClinicianPerformance, timeRange]) // Add timeRange to ensure it triggers on change
+  }, [fetchAnalytics, fetchClinicianPerformance]) // Removed timeRange - already in fetchAnalytics deps
 
   const formatResolutionTime = (days: number): string => {
     if (days < 1) return '<1d'

@@ -13,3 +13,16 @@ yarn-error.log*
 pnpm-lock.yaml
 *.local
 .env.*
+
+# Documentation/Analysis files (optional - uncomment if you don't want these tracked)
+# *_ANALYSIS.md
+# *_CLEANUP*.md
+# *_OPTIMIZATION*.md
+# *_FIX*.md
+# *_AUDIT*.md
+# *_GUIDE.md
+# *_SUMMARY.md
+# *_REPORT.md
+# UAT_*.md
+# TEST_*.md
+# UNUSED_FILES_TO_REMOVE.md

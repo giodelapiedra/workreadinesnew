@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react'
 import { useAuth } from '../../../contexts/AuthContext'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { formatTime } from '../../../shared/date'
+import { checkinsService } from '../../../services/checkinsService'
+import { isApiError } from '../../../lib/apiClient'
 import './CheckInRecords.css'
 
 export function CheckInRecords() {
@@ -34,21 +36,33 @@ export function CheckInRecords() {
   const loadCheckInRecords = async (page: number = 1) => {
     try {
       setRecordsLoading(true)
-      const response = await fetch(`${API_BASE_URL}/api/checkins/history?page=${page}&limit=10&_t=${Date.now()}`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-        },
+      const result = await checkinsService.getCheckInHistory({
+        limit: 10,
+        page: page,
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        setCheckInRecords(data.checkIns || [])
-        setRecordsPagination(data.pagination)
+      if (!isApiError(result)) {
+        // Backend returns checkIns (camelCase) and pagination object
+        const responseData = result.data as any
+        const checkIns = responseData.checkIns || responseData.checkins || []
+        const pagination = responseData.pagination || {}
+        const total = pagination.total || responseData.total || 0
+        
+        setCheckInRecords(checkIns)
+        // Calculate pagination from total
+        const limit = 10
+        const totalPages = Math.ceil(total / limit)
+        setRecordsPagination({
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNext: pagination.hasNext !== undefined ? pagination.hasNext : page < totalPages,
+          hasPrev: pagination.hasPrev !== undefined ? pagination.hasPrev : page > 1,
+        })
         setRecordsPage(page)
       } else {
-        console.error('[CheckInRecords] Failed to load check-in records:', response.status)
+        console.error('[CheckInRecords] Failed to load check-in records:', result.error.status)
         setCheckInRecords([])
       }
     } catch (error) {
@@ -86,14 +100,6 @@ export function CheckInRecords() {
     }
   }
 
-  // Format time for display
-  const formatTime = (timeStr: string): string => {
-    if (!timeStr) return 'N/A'
-    const [hours, minutes] = timeStr.split(':').map(Number)
-    const period = hours >= 12 ? 'PM' : 'AM'
-    const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours
-    return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
-  }
 
   // Get full name
   const getFullName = (): string => {

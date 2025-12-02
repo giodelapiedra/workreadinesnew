@@ -1,8 +1,9 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useAuth } from '../../../contexts/AuthContext'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './WorkerReadiness.css'
 
 interface CheckInData {
@@ -53,6 +54,60 @@ interface CheckInsResponse {
   }
 }
 
+// Constants
+const STATUS_CONFIG = {
+  green: { label: 'Fit to work', color: '#10B981' },
+  amber: { label: 'Minor issue', color: '#F59E0B' },
+  red: { label: 'Not fit to work', color: '#EF4444' },
+  pending: { label: 'Pending', color: '#CBD5E1' },
+  exception: { label: 'Exception', color: '#F59E0B' },
+} as const
+
+const STATUS_ORDER: Record<string, number> = {
+  exception: 0,
+  red: 1,
+  amber: 2,
+  green: 3,
+  pending: 4,
+}
+
+const HISTORY_START_DATE = '2020-01-01'
+
+// Helper functions
+const getLocalToday = (): string => {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+
+const formatDate = (dateStr: string | null | undefined): string => {
+  if (!dateStr) return 'N/A'
+  try {
+    const date = new Date(dateStr)
+    return !isNaN(date.getTime()) ? date.toLocaleDateString() : 'N/A'
+  } catch {
+    return 'N/A'
+  }
+}
+
+const getReadinessLabel = (readiness: string): string => {
+  if (readiness === 'Green') return 'Fit to work'
+  if (readiness === 'Yellow' || readiness === 'Amber') return 'Minor issue'
+  if (readiness === 'Red') return 'Not fit to work'
+  return readiness
+}
+
+const formatExceptionType = (type: string | undefined): string => {
+  if (!type) return 'Exception'
+  return type.replace('_', ' ').replace(/\b\w/g, (l) => l.toUpperCase())
+}
+
+// Status icon component for summary cards
+const StatusIcon = ({ color }: { color: string }) => (
+  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
+    <circle cx="5" cy="5" r="4.5" fill={color}/>
+  </svg>
+)
+
 export function WorkerReadiness() {
   const { user } = useAuth()
   const [checkInsData, setCheckInsData] = useState<CheckInsResponse | null>(null)
@@ -60,171 +115,152 @@ export function WorkerReadiness() {
   const [error, setError] = useState('')
   const [selectedWorker, setSelectedWorker] = useState<CheckInData | null>(null)
   const [showDetailsModal, setShowDetailsModal] = useState(false)
+  const [workerHistory, setWorkerHistory] = useState<{ checkIns: any[]; exceptions: any[] } | null>(null)
+  const [loadingHistory, setLoadingHistory] = useState(false)
   
-  // Get today's date in user's local timezone
-  const getLocalToday = () => {
-    const now = new Date()
-    const year = now.getFullYear()
-    const month = String(now.getMonth() + 1).padStart(2, '0')
-    const day = String(now.getDate()).padStart(2, '0')
-    return `${year}-${month}-${day}`
-  }
-  
-  const today = getLocalToday()
+  const today = useMemo(() => getLocalToday(), [])
   const [startDate, setStartDate] = useState(today)
   const [endDate, setEndDate] = useState(today)
 
-  const loadCheckIns = async () => {
+  const fetchHeaders = useMemo(() => ({
+    'Content-Type': 'application/json',
+  }), [])
+
+  const loadCheckIns = useCallback(async () => {
     try {
       setLoading(true)
       setError('')
       
-      // Validate dates
       if (new Date(startDate) > new Date(endDate)) {
         setError('Start date must be before or equal to end date')
         setLoading(false)
         return
       }
       
-      // Build query params for date range filtering
-      // Add timestamp to prevent caching and ensure latest data
-      const params = new URLSearchParams()
-      params.append('startDate', startDate)
-      params.append('endDate', endDate)
-      params.append('_t', Date.now().toString())
-      
-      const response = await fetch(`${API_BASE_URL}/api/teams/check-ins?${params.toString()}`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-          'Expires': '0',
-        },
+      const params = new URLSearchParams({
+        startDate,
+        endDate,
+        _t: Date.now().toString(),
       })
+      
+      const result = await apiClient.get<CheckInsResponse>(
+        `${API_ROUTES.TEAMS.CHECKINS}?${params.toString()}`,
+        {
+          headers: {
+            ...fetchHeaders,
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+          },
+        }
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to load worker readiness data')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to load worker readiness data')
       }
 
-      const data = await response.json()
-      setCheckInsData(data)
+      setCheckInsData(result.data)
     } catch (err: any) {
       setError(err.message || 'Failed to load worker readiness data')
     } finally {
       setLoading(false)
     }
-  }
+  }, [startDate, endDate, fetchHeaders])
 
-  // Check if viewing today (single date = today)
-  const isToday = startDate === today && endDate === today
+  const isToday = useMemo(() => startDate === today && endDate === today, [startDate, endDate, today])
 
   useEffect(() => {
     if (user) {
       loadCheckIns()
       
-      // Auto-refresh every 30 seconds only if viewing today
       if (isToday) {
-        const interval = setInterval(() => {
-          loadCheckIns()
-        }, 30000)
-
+        const interval = setInterval(loadCheckIns, 30000)
         return () => clearInterval(interval)
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user, startDate, endDate])
+  }, [user, loadCheckIns, isToday])
 
+  const resetToToday = useCallback(() => {
+    setStartDate(today)
+    setEndDate(today)
+  }, [today])
 
-  // Function to reset to today (uses local timezone)
-  const resetToToday = () => {
-    const todayStr = getLocalToday()
-    setStartDate(todayStr)
-    setEndDate(todayStr)
-  }
+  // Load worker history - completely independent of date filter, always shows ALL history
+  const loadWorkerHistory = useCallback(async (workerId: string) => {
+    try {
+      setLoadingHistory(true)
+      
+      const [exceptionsResult, checkInsResult] = await Promise.all([
+        apiClient.get<{ exception: any }>(
+          API_ROUTES.TEAMS.MEMBER_EXCEPTION(workerId),
+          { headers: fetchHeaders }
+        ),
+        apiClient.get<{ checkIns: any[] }>(
+          `${API_ROUTES.TEAMS.MEMBER(workerId)}/check-ins?startDate=${HISTORY_START_DATE}&endDate=${today}`,
+          { headers: fetchHeaders }
+        ),
+      ])
 
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'green':
-        return (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="6" cy="6" r="5" fill="#10B981" stroke="#FFFFFF" strokeWidth="1.5"/>
-          </svg>
-        )
-      case 'amber':
-        return (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="6" cy="6" r="5" fill="#F59E0B" stroke="#FFFFFF" strokeWidth="1.5"/>
-          </svg>
-        )
-      case 'red':
-        return (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="6" cy="6" r="5" fill="#EF4444" stroke="#FFFFFF" strokeWidth="1.5"/>
-          </svg>
-        )
-      case 'pending':
-        return (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="6" cy="6" r="5" fill="#CBD5E1" stroke="#FFFFFF" strokeWidth="1.5"/>
-          </svg>
-        )
-      case 'exception':
-        return (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M6 2L10 10H2L6 2Z" fill="#F59E0B"/>
+      if (isApiError(checkInsResult)) {
+        throw new Error(getApiErrorMessage(checkInsResult) || 'Failed to fetch check-ins')
+      }
+
+      const exceptionsData = !isApiError(exceptionsResult) ? exceptionsResult.data : { exception: null }
+      const checkInsData = checkInsResult.data
+
+      setWorkerHistory({
+        checkIns: checkInsData.checkIns || [],
+        exceptions: exceptionsData.exception ? [exceptionsData.exception] : (exceptionsData.exceptions || []),
+      })
+    } catch (err: any) {
+      console.error('Error loading worker history:', err)
+      setWorkerHistory({ checkIns: [], exceptions: [] })
+    } finally {
+      setLoadingHistory(false)
+    }
+  }, [today, fetchHeaders])
+
+  const handleViewClick = useCallback(async (worker: CheckInData) => {
+    setSelectedWorker(worker)
+    setShowDetailsModal(true)
+    await loadWorkerHistory(worker.userId)
+  }, [loadWorkerHistory])
+
+  const handleRowClick = useCallback((checkIn: CheckInData) => {
+    if (checkIn.hasCheckedIn) {
+      handleViewClick(checkIn)
+    }
+  }, [handleViewClick])
+
+  const getStatusIcon = useCallback((status: string) => {
+    const config = STATUS_CONFIG[status as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.pending
+    const isException = status === 'exception'
+    
+    return (
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+        {isException ? (
+          <>
+            <path d="M6 2L10 10H2L6 2Z" fill={config.color}/>
             <path d="M6 7V8.5M6 5.5V6" stroke="#FFFFFF" strokeWidth="0.8" strokeLinecap="round"/>
-          </svg>
-        )
-      default:
-        return (
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="6" cy="6" r="2" fill="#94A3B8"/>
-          </svg>
-        )
-    }
-  }
+          </>
+        ) : (
+          <circle cx="6" cy="6" r="5" fill={config.color} stroke="#FFFFFF" strokeWidth="1.5"/>
+        )}
+      </svg>
+    )
+  }, [])
 
-  const getStatusLabel = (status: string) => {
-    switch (status) {
-      case 'green':
-        return 'Fit to work'
-      case 'amber':
-        return 'Minor issue'
-      case 'red':
-        return 'Not fit to work'
-      case 'pending':
-        return 'Pending'
-      case 'exception':
-        return 'Exception'
-      default:
-        return 'Unknown'
-    }
-  }
+  const getStatusLabel = useCallback((status: string) => {
+    return STATUS_CONFIG[status as keyof typeof STATUS_CONFIG]?.label || 'Unknown'
+  }, [])
 
-  // Memoize sorted check-ins - optimized to prevent unnecessary recalculations
   const sortedCheckIns = useMemo(() => {
     if (!checkInsData?.checkIns) return []
     
     return [...checkInsData.checkIns].sort((a, b) => {
-      // Priority: exception > red > amber > green > pending
-      const statusOrder: Record<string, number> = {
-        exception: 0,
-        red: 1,
-        amber: 2,
-        green: 3,
-        pending: 4,
-      }
-      
-      const aOrder = statusOrder[a.status] ?? 5
-      const bOrder = statusOrder[b.status] ?? 5
-      
-      if (aOrder !== bOrder) {
-        return aOrder - bOrder
-      }
-      
-      // If same status, sort by name
-      return a.workerName.localeCompare(b.workerName)
+      const aOrder = STATUS_ORDER[a.status] ?? 5
+      const bOrder = STATUS_ORDER[b.status] ?? 5
+      return aOrder !== bOrder ? aOrder - bOrder : a.workerName.localeCompare(b.workerName)
     })
   }, [checkInsData?.checkIns])
 
@@ -330,37 +366,29 @@ export function WorkerReadiness() {
               <div className="summary-card status-green">
                 <div className="summary-value">{checkInsData.statistics.green}</div>
                 <div className="summary-label">
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
-                    <circle cx="5" cy="5" r="4.5" fill="#10B981"/>
-                  </svg>
-                  Fit to work
+                  <StatusIcon color={STATUS_CONFIG.green.color} />
+                  {STATUS_CONFIG.green.label}
                 </div>
               </div>
               <div className="summary-card status-amber">
                 <div className="summary-value">{checkInsData.statistics.amber}</div>
                 <div className="summary-label">
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
-                    <circle cx="5" cy="5" r="4.5" fill="#F59E0B"/>
-                  </svg>
-                  Minor issue
+                  <StatusIcon color={STATUS_CONFIG.amber.color} />
+                  {STATUS_CONFIG.amber.label}
                 </div>
               </div>
               <div className="summary-card status-red">
                 <div className="summary-value">{checkInsData.statistics.red}</div>
                 <div className="summary-label">
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
-                    <circle cx="5" cy="5" r="4.5" fill="#EF4444"/>
-                  </svg>
-                  Not fit to work
+                  <StatusIcon color={STATUS_CONFIG.red.color} />
+                  {STATUS_CONFIG.red.label}
                 </div>
               </div>
               <div className="summary-card status-pending">
                 <div className="summary-value">{checkInsData.statistics.pending}</div>
                 <div className="summary-label">
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
-                    <circle cx="5" cy="5" r="4.5" fill="#CBD5E1"/>
-                  </svg>
-                  Pending
+                  <StatusIcon color={STATUS_CONFIG.pending.color} />
+                  {STATUS_CONFIG.pending.label}
                 </div>
               </div>
               {checkInsData.statistics.withExceptions > 0 && (
@@ -368,7 +396,7 @@ export function WorkerReadiness() {
                   <div className="summary-value">{checkInsData.statistics.withExceptions}</div>
                   <div className="summary-label">
                     <svg width="10" height="10" viewBox="0 0 10 10" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '6px', verticalAlign: 'middle' }}>
-                      <path d="M5 2L8.5 8H1.5L5 2Z" fill="#F59E0B"/>
+                      <path d="M5 2L8.5 8H1.5L5 2Z" fill={STATUS_CONFIG.exception.color}/>
                       <circle cx="5" cy="7" r="0.5" fill="#FFFFFF"/>
                     </svg>
                     On Exception
@@ -389,6 +417,7 @@ export function WorkerReadiness() {
                     <div className="col-time">Check-in Time</div>
                     <div className="col-metrics">Metrics</div>
                     <div className="col-readiness">Readiness</div>
+                    <div className="col-actions">Actions</div>
                   </div>
                   
                   <div className="readiness-table-body">
@@ -396,12 +425,7 @@ export function WorkerReadiness() {
                       <div 
                         key={checkIn.userId} 
                         className={`readiness-table-row status-${checkIn.status} ${checkIn.hasCheckedIn ? 'clickable' : ''}`}
-                        onClick={() => {
-                          if (checkIn.hasCheckedIn) {
-                            setSelectedWorker(checkIn)
-                            setShowDetailsModal(true)
-                          }
-                        }}
+                        onClick={() => handleRowClick(checkIn)}
                         style={{ cursor: checkIn.hasCheckedIn ? 'pointer' : 'default' }}
                       >
                         <div className="col-worker">
@@ -412,24 +436,20 @@ export function WorkerReadiness() {
                             <div className="worker-details">
                               <div className="worker-name">{checkIn.workerName}</div>
                               <div className="worker-email">{checkIn.workerEmail}</div>
-                              {checkIn.hasActiveException && (
-                                <div className="worker-exception">
-                                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ display: 'inline-block', marginRight: '4px', verticalAlign: 'middle' }}>
-                                    <path d="M6 2L10 10H2L6 2Z" fill="#F59E0B"/>
-                                    <circle cx="6" cy="7.5" r="0.5" fill="#FFFFFF"/>
-                                  </svg>
-                                  {checkIn.exception?.type?.replace('_', ' ').replace(/\b\w/g, (l: string) => l.toUpperCase())}
-                                  {checkIn.exception?.reason && `: ${checkIn.exception.reason}`}
-                                </div>
-                              )}
                             </div>
                           </div>
                         </div>
                         
                         <div className="col-status">
-                          <span className={`status-badge status-${checkIn.status}`}>
-                            {getStatusIcon(checkIn.status)} {getStatusLabel(checkIn.status)}
-                          </span>
+                          {checkIn.hasCheckedIn && checkIn.checkIn ? (
+                            <span className={`status-badge status-${checkIn.status}`}>
+                              {getStatusIcon(checkIn.status)} {getStatusLabel(checkIn.status)}
+                            </span>
+                          ) : (
+                            <span className="status-badge status-pending">
+                              {getStatusIcon('pending')} {getStatusLabel('pending')}
+                            </span>
+                          )}
                         </div>
                         
                         <div className="col-time">
@@ -443,8 +463,6 @@ export function WorkerReadiness() {
                                 </div>
                               )}
                             </div>
-                          ) : checkIn.hasActiveException ? (
-                            <span className="exception-text">On Exception</span>
                           ) : (
                             <span className="pending-text">Not checked in</span>
                           )}
@@ -486,36 +504,34 @@ export function WorkerReadiness() {
                         <div className="col-readiness">
                           {checkIn.hasCheckedIn && checkIn.checkIn ? (
                             <div className="readiness-info">
-                              <span 
-                                className={`readiness-badge readiness-${checkIn.checkIn.predictedReadiness.toLowerCase()}`}
-                              >
-                                {checkIn.checkIn.predictedReadiness === 'Green' ? 'Fit to work' :
-                                 checkIn.checkIn.predictedReadiness === 'Yellow' ? 'Minor issue' :
-                                 'Not fit to work'}
+                              <span className={`readiness-badge readiness-${checkIn.checkIn.predictedReadiness.toLowerCase()}`}>
+                                {getReadinessLabel(checkIn.checkIn.predictedReadiness)}
                               </span>
-                              {checkIn.hasWarmUp && (
-                                <span className="warmup-badge">✓ Warm-up</span>
-                              )}
+                              {checkIn.hasWarmUp && <span className="warmup-badge">✓ Warm-up</span>}
                               {checkIn.checkIn.additionalNotes && (
-                                <div className="notes-tooltip" title={checkIn.checkIn.additionalNotes}>
-                                  📝 Notes
-                                </div>
+                                <div className="notes-tooltip" title={checkIn.checkIn.additionalNotes}>📝 Notes</div>
                               )}
-                              <button 
-                                className="view-details-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setSelectedWorker(checkIn)
-                                  setShowDetailsModal(true)
-                                }}
-                                title="View Details"
-                              >
-                                View
-                              </button>
                             </div>
                           ) : (
                             <span className="no-readiness">-</span>
                           )}
+                        </div>
+                        
+                        <div className="col-actions">
+                          <button 
+                            className="view-details-btn"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleViewClick(checkIn)
+                            }}
+                            title="View Worker History"
+                          >
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                              <circle cx="12" cy="12" r="3"></circle>
+                            </svg>
+                            View
+                          </button>
                         </div>
                       </div>
                     ))}
@@ -535,7 +551,7 @@ export function WorkerReadiness() {
         )}
 
         {/* Details Modal */}
-        {showDetailsModal && selectedWorker && selectedWorker.checkIn && (
+        {showDetailsModal && selectedWorker && (
           <div className="details-modal-overlay" onClick={() => setShowDetailsModal(false)}>
             <div className="details-modal-content" onClick={(e) => e.stopPropagation()}>
               <div className="details-modal-header">
@@ -558,175 +574,135 @@ export function WorkerReadiness() {
               </div>
 
               <div className="details-modal-body">
-                {/* Status Section */}
-                <div className="details-section">
-                  <h3 className="details-section-title">Status</h3>
-                  <div className="details-status-grid">
-                    <div className="details-status-item">
-                      <span className="details-label">Readiness:</span>
-                      <span 
-                        className={`readiness-badge readiness-${selectedWorker.checkIn.predictedReadiness.toLowerCase()}`}
-                      >
-                        {selectedWorker.checkIn.predictedReadiness === 'Green' ? 'Fit to work' :
-                         selectedWorker.checkIn.predictedReadiness === 'Yellow' ? 'Minor issue' :
-                         'Not fit to work'}
-                      </span>
-                    </div>
-                    <div className="details-status-item">
-                      <span className="details-label">Warm-up:</span>
-                      <span className={selectedWorker.hasWarmUp ? 'status-complete' : 'status-incomplete'}>
-                        {selectedWorker.hasWarmUp ? '✓ Complete' : '✗ Not Completed'}
-                      </span>
-                    </div>
-                    <div className="details-status-item">
-                      <span className="details-label">Check-in Time:</span>
-                      <span className="details-value">{selectedWorker.checkIn.checkInTime || 'N/A'}</span>
-                    </div>
-                    {selectedWorker.checkIn.shiftType && (
-                      <div className="details-status-item">
-                        <span className="details-label">Shift:</span>
-                        <span className="details-value">
-                          {selectedWorker.checkIn.shiftType.charAt(0).toUpperCase() + selectedWorker.checkIn.shiftType.slice(1)}
-                          {selectedWorker.checkIn.shiftStartTime && 
-                            ` (${selectedWorker.checkIn.shiftStartTime.substring(0, 5)} - ${selectedWorker.checkIn.shiftEndTime?.substring(0, 5)})`
-                          }
-                        </span>
+                {loadingHistory ? (
+                  <Loading message="Loading worker history..." size="medium" />
+                ) : (
+                  <>
+                    {/* Today's Check-in (if available) */}
+                    {selectedWorker.checkIn && (
+                      <div className="details-section">
+                        <h3 className="details-section-title">Today's Check-in</h3>
+                        <div className="details-status-grid">
+                          <div className="details-status-item">
+                            <span className="details-label">Readiness:</span>
+                            <span className={`readiness-badge readiness-${selectedWorker.checkIn.predictedReadiness.toLowerCase()}`}>
+                              {getReadinessLabel(selectedWorker.checkIn.predictedReadiness)}
+                            </span>
+                          </div>
+                          <div className="details-status-item">
+                            <span className="details-label">Check-in Time:</span>
+                            <span className="details-value">{selectedWorker.checkIn.checkInTime || 'N/A'}</span>
+                          </div>
+                          <div className="details-status-item">
+                            <span className="details-label">Pain:</span>
+                            <span className="details-value">{selectedWorker.checkIn.painLevel}/10</span>
+                          </div>
+                          <div className="details-status-item">
+                            <span className="details-label">Fatigue:</span>
+                            <span className="details-value">{selectedWorker.checkIn.fatigueLevel}/10</span>
+                          </div>
+                          <div className="details-status-item">
+                            <span className="details-label">Stress:</span>
+                            <span className="details-value">{selectedWorker.checkIn.stressLevel}/10</span>
+                          </div>
+                          <div className="details-status-item">
+                            <span className="details-label">Sleep:</span>
+                            <span className="details-value">{selectedWorker.checkIn.sleepQuality}/12</span>
+                          </div>
+                        </div>
+                        {selectedWorker.checkIn.additionalNotes && (
+                          <div className="details-notes" style={{ marginTop: '12px' }}>
+                            <strong>Notes:</strong> {selectedWorker.checkIn.additionalNotes}
+                          </div>
+                        )}
                       </div>
                     )}
-                  </div>
-                </div>
 
-                {/* Metrics Section */}
-                <div className="details-section">
-                  <h3 className="details-section-title">Health Metrics</h3>
-                  <div className="details-metrics-grid">
-                    <div className="details-metric-card">
-                      <div className="details-metric-header">
-                        <span className="details-metric-label">Pain Level</span>
-                        <span className={`details-metric-value ${selectedWorker.checkIn.painLevel >= 5 ? 'high' : selectedWorker.checkIn.painLevel >= 3 ? 'medium' : 'low'}`}>
-                          {selectedWorker.checkIn.painLevel}/10
-                        </span>
-                      </div>
-                      <div className="details-metric-bar">
-                        <div 
-                          className={`details-metric-fill ${selectedWorker.checkIn.painLevel >= 5 ? 'fill-high' : selectedWorker.checkIn.painLevel >= 3 ? 'fill-medium' : 'fill-low'}`}
-                          style={{ width: `${(selectedWorker.checkIn.painLevel / 10) * 100}%` }}
-                        />
-                      </div>
-                      <div className="details-metric-description">
-                        {selectedWorker.checkIn.painLevel === 0 && 'No pain'}
-                        {selectedWorker.checkIn.painLevel >= 1 && selectedWorker.checkIn.painLevel <= 2 && 'Mild pain'}
-                        {selectedWorker.checkIn.painLevel >= 3 && selectedWorker.checkIn.painLevel <= 4 && 'Moderate pain'}
-                        {selectedWorker.checkIn.painLevel >= 5 && selectedWorker.checkIn.painLevel <= 7 && 'Moderate to severe pain'}
-                        {selectedWorker.checkIn.painLevel >= 8 && 'Severe pain'}
-                      </div>
-                    </div>
-
-                    <div className="details-metric-card">
-                      <div className="details-metric-header">
-                        <span className="details-metric-label">Fatigue Level</span>
-                        <span className={`details-metric-value ${selectedWorker.checkIn.fatigueLevel >= 7 ? 'high' : selectedWorker.checkIn.fatigueLevel >= 5 ? 'medium' : 'low'}`}>
-                          {selectedWorker.checkIn.fatigueLevel}/10
-                        </span>
-                      </div>
-                      <div className="details-metric-bar">
-                        <div 
-                          className={`details-metric-fill ${selectedWorker.checkIn.fatigueLevel >= 7 ? 'fill-high' : selectedWorker.checkIn.fatigueLevel >= 5 ? 'fill-medium' : 'fill-low'}`}
-                          style={{ width: `${(selectedWorker.checkIn.fatigueLevel / 10) * 100}%` }}
-                        />
-                      </div>
-                      <div className="details-metric-description">
-                        {selectedWorker.checkIn.fatigueLevel <= 3 && 'Low fatigue'}
-                        {selectedWorker.checkIn.fatigueLevel >= 4 && selectedWorker.checkIn.fatigueLevel <= 6 && 'Moderate fatigue'}
-                        {selectedWorker.checkIn.fatigueLevel >= 7 && 'High fatigue - may need rest'}
-                      </div>
-                    </div>
-
-                    <div className="details-metric-card">
-                      <div className="details-metric-header">
-                        <span className="details-metric-label">Stress Level</span>
-                        <span className={`details-metric-value ${selectedWorker.checkIn.stressLevel >= 7 ? 'high' : selectedWorker.checkIn.stressLevel >= 5 ? 'medium' : 'low'}`}>
-                          {selectedWorker.checkIn.stressLevel}/10
-                        </span>
-                      </div>
-                      <div className="details-metric-bar">
-                        <div 
-                          className={`details-metric-fill ${selectedWorker.checkIn.stressLevel >= 7 ? 'fill-high' : selectedWorker.checkIn.stressLevel >= 5 ? 'fill-medium' : 'fill-low'}`}
-                          style={{ width: `${(selectedWorker.checkIn.stressLevel / 10) * 100}%` }}
-                        />
-                      </div>
-                      <div className="details-metric-description">
-                        {selectedWorker.checkIn.stressLevel <= 3 && 'Low stress'}
-                        {selectedWorker.checkIn.stressLevel >= 4 && selectedWorker.checkIn.stressLevel <= 6 && 'Moderate stress'}
-                        {selectedWorker.checkIn.stressLevel >= 7 && 'High stress - monitoring recommended'}
-                      </div>
-                    </div>
-
-                    <div className="details-metric-card">
-                      <div className="details-metric-header">
-                        <span className="details-metric-label">Sleep Quality</span>
-                        <span className={`details-metric-value ${selectedWorker.checkIn.sleepQuality >= 8 ? 'good' : selectedWorker.checkIn.sleepQuality >= 6 ? 'medium' : 'low'}`}>
-                          {selectedWorker.checkIn.sleepQuality}/12
-                        </span>
-                      </div>
-                      <div className="details-metric-bar">
-                        <div 
-                          className={`details-metric-fill ${selectedWorker.checkIn.sleepQuality >= 8 ? 'fill-good' : selectedWorker.checkIn.sleepQuality >= 6 ? 'fill-medium' : 'fill-low'}`}
-                          style={{ width: `${(selectedWorker.checkIn.sleepQuality / 12) * 100}%` }}
-                        />
-                      </div>
-                      <div className="details-metric-description">
-                        {selectedWorker.checkIn.sleepQuality >= 8 && 'Good sleep quality'}
-                        {selectedWorker.checkIn.sleepQuality >= 6 && selectedWorker.checkIn.sleepQuality < 8 && 'Fair sleep quality'}
-                        {selectedWorker.checkIn.sleepQuality < 6 && 'Poor sleep quality - may affect performance'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Additional Notes */}
-                {selectedWorker.checkIn.additionalNotes && (
-                  <div className="details-section">
-                    <h3 className="details-section-title">Additional Notes</h3>
-                    <div className="details-notes">
-                      {selectedWorker.checkIn.additionalNotes}
-                    </div>
-                  </div>
-                )}
-
-                {/* Exception Info */}
-                {selectedWorker.hasActiveException && selectedWorker.exception && (
-                  <div className="details-section">
-                    <h3 className="details-section-title">Exception Information</h3>
-                    <div className="details-exception">
-                      <div className="details-exception-item">
-                        <span className="details-label">Type:</span>
-                        <span className="details-value">
-                          {selectedWorker.exception.type?.replace('_', ' ').replace(/\b\w/g, (l: string) => l.toUpperCase())}
-                        </span>
-                      </div>
-                      {selectedWorker.exception.reason && (
-                        <div className="details-exception-item">
-                          <span className="details-label">Reason:</span>
-                          <span className="details-value">{selectedWorker.exception.reason}</span>
+                    {/* Check-in History */}
+                    {workerHistory?.checkIns && workerHistory.checkIns.length > 0 && (
+                      <div className="details-section">
+                        <h3 className="details-section-title">Check-in History</h3>
+                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                          {workerHistory.checkIns.map((checkIn: any, index: number) => {
+                            const { check_in_date, check_in_time, predicted_readiness, pain_level, fatigue_level, stress_level, sleep_quality, additional_notes } = checkIn
+                            const metrics = [
+                              pain_level !== undefined && `Pain: ${pain_level}/10`,
+                              fatigue_level !== undefined && `Fatigue: ${fatigue_level}/10`,
+                              stress_level !== undefined && `Stress: ${stress_level}/10`,
+                              sleep_quality !== undefined && `Sleep: ${sleep_quality}/12`,
+                            ].filter(Boolean).join(' | ')
+                            
+                            return (
+                              <div key={index} style={{ padding: '12px', borderBottom: '1px solid #E2E8F0', marginBottom: '8px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                  <strong>{formatDate(check_in_date)}</strong>
+                                  <span className={`readiness-badge readiness-${(predicted_readiness || '').toLowerCase()}`}>
+                                    {predicted_readiness || 'N/A'}
+                                  </span>
+                                </div>
+                                <div style={{ fontSize: '13px', color: '#64748B' }}>
+                                  <div>Time: {check_in_time || 'N/A'}</div>
+                                  {metrics && <div>{metrics}</div>}
+                                  {additional_notes && (
+                                    <div style={{ marginTop: '4px', fontStyle: 'italic' }}>{additional_notes}</div>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
                         </div>
-                      )}
-                      <div className="details-exception-item">
-                        <span className="details-label">Start Date:</span>
-                        <span className="details-value">
-                          {new Date(selectedWorker.exception.startDate).toLocaleDateString()}
-                        </span>
                       </div>
-                      {selectedWorker.exception.endDate && (
-                        <div className="details-exception-item">
-                          <span className="details-label">End Date:</span>
-                          <span className="details-value">
-                            {new Date(selectedWorker.exception.endDate).toLocaleDateString()}
-                          </span>
+                    )}
+
+                    {/* Cases/Exceptions History */}
+                    {workerHistory?.exceptions && workerHistory.exceptions.length > 0 && (
+                      <div className="details-section">
+                        <h3 className="details-section-title">Cases & Exceptions History</h3>
+                        <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                          {workerHistory.exceptions.map((exception: any, index: number) => {
+                            const { exception_type, reason, start_date, end_date, is_active } = exception
+                            const formattedStartDate = formatDate(start_date)
+                            const formattedEndDate = formatDate(end_date)
+                            
+                            return (
+                              <div key={index} className="details-exception" style={{ marginBottom: '12px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                  <strong>{formatExceptionType(exception_type)}</strong>
+                                  <span style={{ 
+                                    padding: '2px 8px', 
+                                    borderRadius: '4px', 
+                                    fontSize: '11px',
+                                    background: is_active ? '#FFFBEB' : '#F8FAFC',
+                                    color: is_active ? '#B45309' : '#64748B'
+                                  }}>
+                                    {is_active ? 'Active' : 'Closed'}
+                                  </span>
+                                </div>
+                                {reason && (
+                                  <div style={{ marginBottom: '4px', fontSize: '13px' }}>
+                                    <strong>Reason:</strong> {reason}
+                                  </div>
+                                )}
+                                <div style={{ fontSize: '12px', color: '#64748B' }}>
+                                  <div>Start: {formattedStartDate}</div>
+                                  <div>End: {formattedEndDate || 'Ongoing'}</div>
+                                </div>
+                              </div>
+                            )
+                          })}
                         </div>
-                      )}
-                    </div>
-                  </div>
+                      </div>
+                    )}
+
+                    {(!workerHistory?.checkIns || workerHistory.checkIns.length === 0) && 
+                     (!workerHistory?.exceptions || workerHistory.exceptions.length === 0) && (
+                      <div className="details-section">
+                        <p style={{ color: '#64748B', textAlign: 'center', padding: '20px' }}>
+                          No history available for this worker.
+                        </p>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>

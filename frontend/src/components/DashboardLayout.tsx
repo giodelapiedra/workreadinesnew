@@ -46,15 +46,41 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
   // Calculate sidebar width for CSS variable
   const sidebarWidth = isMobile ? 0 : (!sidebarOpen ? 70 : 260)
 
+  // Prevent body blur when sidebar is open on mobile
+  useEffect(() => {
+    if (isMobile && sidebarOpen) {
+      // Ensure body and html have no blur
+      document.body.style.setProperty('filter', 'none', 'important')
+      document.body.style.setProperty('backdrop-filter', 'none', 'important')
+      document.body.style.setProperty('-webkit-backdrop-filter', 'none', 'important')
+      document.documentElement.style.setProperty('filter', 'none', 'important')
+      document.documentElement.style.setProperty('backdrop-filter', 'none', 'important')
+      document.documentElement.style.setProperty('-webkit-backdrop-filter', 'none', 'important')
+      
+      // Ensure dashboard content has no blur
+      const content = document.querySelector('.dashboard-content') as HTMLElement
+      if (content) {
+        content.style.setProperty('filter', 'none', 'important')
+        content.style.setProperty('backdrop-filter', 'none', 'important')
+        content.style.setProperty('-webkit-backdrop-filter', 'none', 'important')
+      }
+    } else {
+      // Reset when sidebar is closed
+      document.body.style.removeProperty('filter')
+      document.body.style.removeProperty('backdrop-filter')
+      document.body.style.removeProperty('-webkit-backdrop-filter')
+      document.documentElement.style.removeProperty('filter')
+      document.documentElement.style.removeProperty('backdrop-filter')
+      document.documentElement.style.removeProperty('-webkit-backdrop-filter')
+    }
+  }, [isMobile, sidebarOpen])
+
   return (
     <div 
       className="dashboard-layout"
       style={{ '--sidebar-width': `${sidebarWidth}px` } as React.CSSProperties}
     >
-      {/* Mobile Overlay */}
-      {isMobile && sidebarOpen && (
-        <div className="sidebar-overlay" onClick={closeSidebar}></div>
-      )}
+      {/* No overlay on mobile - sidebar opens without dark background */}
       
       <Sidebar 
         isOpen={sidebarOpen} 

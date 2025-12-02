@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { API_BASE_URL } from '../../../config/api'
 import { PROTECTED_ROUTES } from '../../../config/routes'
+import { formatTime } from '../../../shared/date'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './DailyCheckIn.css'
 
 interface ShiftInfo {
@@ -49,6 +51,7 @@ export function DailyCheckIn() {
   const [loadingNextShift, setLoadingNextShift] = useState(false)
   const [hasAssignedSchedule, setHasAssignedSchedule] = useState(false)
   const [validationError, setValidationError] = useState<string | null>(null)
+  const [showSuccessToast, setShowSuccessToast] = useState(false)
 
   // Calculate predicted readiness based on all factors
   const calculateReadiness = () => {
@@ -69,16 +72,10 @@ export function DailyCheckIn() {
       setLoadingNextShift(true)
       setNextShiftInfo(null) // Clear old data first
       
-      const response = await fetch(`${API_BASE_URL}/api/checkins/next-shift-info`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.get<ShiftInfo>(API_ROUTES.CHECKINS.NEXT_SHIFT_INFO)
       
-      if (response.ok) {
-        const data = await response.json()
-        setNextShiftInfo(data)
+      if (!isApiError(result)) {
+        setNextShiftInfo(result.data)
       } else {
         setNextShiftInfo(null)
       }
@@ -107,18 +104,19 @@ export function DailyCheckIn() {
           setExceptionInfo(null)
         }
 
-        const response = await fetch(`${API_BASE_URL}/api/checkins/status`, {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+        const result = await apiClient.get<{
+          hasCheckedIn: boolean
+          checkIn?: { check_in_time?: string; predicted_readiness?: string }
+          hasActiveException?: boolean
+          exception?: any
+        }>(API_ROUTES.CHECKINS.STATUS, {
           signal: abortController.signal,
         })
         
         if (!isMounted) return
 
-        if (response.ok) {
-          const data = await response.json()
+        if (!isApiError(result)) {
+          const data = result.data
           if (data.hasCheckedIn && data.checkIn) {
             if (isMounted) {
               setHasAlreadyCheckedIn(true)
@@ -131,6 +129,8 @@ export function DailyCheckIn() {
           } else {
             if (isMounted) {
               setHasAlreadyCheckedIn(false)
+              // Also load next shift info when not checked in to show modal if needed
+              loadNextShiftInfo()
             }
           }
 
@@ -182,18 +182,14 @@ export function DailyCheckIn() {
           setShiftInfo(null)
         }
 
-        const response = await fetch(`${API_BASE_URL}/api/checkins/shift-info`, {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-          },
+        const result = await apiClient.get<ShiftInfo>(API_ROUTES.CHECKINS.SHIFT_INFO, {
           signal: abortController.signal,
         })
         
         if (!isMounted) return
 
-        if (response.ok) {
-          const data = await response.json()
+        if (!isApiError(result)) {
+          const data = result.data
           if (isMounted) {
             setShiftInfo(data)
             // Check if worker has assigned schedule from team leader (only individual schedules, no fallback)
@@ -201,11 +197,10 @@ export function DailyCheckIn() {
             setHasAssignedSchedule(hasSchedule)
           }
         } else {
-          const errorData = await response.json().catch(() => ({ error: 'Unknown error' }))
-          console.error('Failed to load shift info:', response.status, errorData)
+          console.error('Failed to load shift info:', result.error.status, result.error)
           
           // If unauthorized, show a message but don't break the check-in flow
-          if (response.status === 401 && isMounted) {
+          if (result.error.status === 401 && isMounted) {
             console.warn('Not authenticated for shift info - check-in can still proceed')
             // Set default flexible schedule (no assigned schedule)
             setShiftInfo({
@@ -270,14 +265,6 @@ export function DailyCheckIn() {
     const targetDate = new Date(today)
     targetDate.setDate(today.getDate() + offset)
     return days[targetDate.getDay()]
-  }
-
-  // Format time for display (HH:MM -> HH:MM AM/PM)
-  const formatTime = (timeStr: string): string => {
-    const [hours, minutes] = timeStr.split(':').map(Number)
-    const period = hours >= 12 ? 'PM' : 'AM'
-    const displayHours = hours === 0 ? 12 : hours > 12 ? hours - 12 : hours
-    return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
   }
 
   // Format time with day indication if needed
@@ -346,35 +333,35 @@ export function DailyCheckIn() {
     }
     
     try {
-      const checkInData = {
-        painLevel,
-        fatigueLevel,
-        sleepQuality,
-        stressLevel,
-        additionalNotes,
-        predictedReadiness: readiness.level,
-      }
+      // Send data in the format the backend expects (camelCase)
+      const result = await apiClient.post<{ message: string; checkIn: any }>(
+        API_ROUTES.CHECKINS.SUBMIT,
+        {
+          painLevel,
+          fatigueLevel,
+          sleepQuality,
+          stressLevel,
+          additionalNotes: additionalNotes.trim() || undefined,
+          predictedReadiness: readiness.level,
+        }
+      )
 
-      const response = await fetch(`${API_BASE_URL}/api/checkins`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify(checkInData),
-      })
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        alert(data.error || 'Failed to submit check-in. Please try again.')
+      if (isApiError(result)) {
+        alert(getApiErrorMessage(result) || 'Failed to submit check-in. Please try again.')
         return
       }
 
-      // Show success message and redirect
-      alert('Check-in submitted successfully!')
-      // Reload dashboard to update status
-      window.location.href = '/dashboard/worker'
+      // Show success toast
+      setShowSuccessToast(true)
+      
+      // Auto-hide toast and redirect after 2 seconds
+      setTimeout(() => {
+        setShowSuccessToast(false)
+        // Redirect to dashboard after toast animation
+        setTimeout(() => {
+          window.location.href = '/dashboard/worker'
+        }, 300)
+      }, 2000)
     } catch (error: any) {
       console.error('Check-in error:', error)
       alert('Failed to submit check-in. Please try again.')
@@ -1018,6 +1005,18 @@ export function DailyCheckIn() {
             Submit Check-In
           </button>
         </form>
+        )}
+
+        {/* Success Toast Notification */}
+        {showSuccessToast && (
+          <div className="success-toast">
+            <div className="success-toast-content">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              <span>Check-in submitted successfully!</span>
+            </div>
+          </div>
         )}
       </div>
     </div>

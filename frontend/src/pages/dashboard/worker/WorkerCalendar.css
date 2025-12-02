@@ -4,6 +4,43 @@
   margin: 0 auto;
 }
 
+.worker-calendar-error {
+  background: #fff1f2;
+  border: 1px solid #fecdd3;
+  color: #9f1239;
+  padding: 24px;
+  border-radius: 12px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+}
+
+.worker-calendar-error p {
+  margin: 0;
+  font-size: 14px;
+  max-width: 360px;
+}
+
+.retry-button {
+  background: #f97316;
+  color: white;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 20px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.retry-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(249, 115, 22, 0.25);
+}
+
 .worker-calendar-header {
   margin-bottom: 24px;
 }

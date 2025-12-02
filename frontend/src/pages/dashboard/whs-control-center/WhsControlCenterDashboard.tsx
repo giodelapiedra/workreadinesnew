@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { PROTECTED_ROUTES } from '../../../config/routes'
 import { useAuth } from '../../../contexts/AuthContext'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './WhsControlCenterDashboard.css'
 
 interface Case {
@@ -31,6 +34,8 @@ interface Case {
   updatedAt: string
   approvedBy?: string | null
   approvedAt?: string | null
+  returnToWorkDutyType?: 'modified' | 'full' | null
+  returnToWorkDate?: string | null
 }
 
 interface Clinician {
@@ -57,6 +62,7 @@ const TYPE_LABELS: Record<string, string> = {
 
 export function WhsControlCenterDashboard() {
   const { user, first_name } = useAuth()
+  const navigate = useNavigate()
   const [cases, setCases] = useState<Case[]>([])
   const [summary, setSummary] = useState<Summary>({
     total: 0,
@@ -75,12 +81,13 @@ export function WhsControlCenterDashboard() {
   const [refreshKey, setRefreshKey] = useState(0)
   const itemsPerPage = 20
   const [selectedCase, setSelectedCase] = useState<Case | null>(null)
-  const [showViewModal, setShowViewModal] = useState(false)
   const [showAssignModal, setShowAssignModal] = useState(false)
   const [clinicians, setClinicians] = useState<Clinician[]>([])
   const [selectedClinicianId, setSelectedClinicianId] = useState('')
   const [assigning, setAssigning] = useState(false)
   const [loadingClinicians, setLoadingClinicians] = useState(false)
+  const [showSuccessToast, setShowSuccessToast] = useState(false)
+  const [successMessage, setSuccessMessage] = useState('')
 
   // Debounce search query to prevent excessive API calls
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery)
@@ -110,20 +117,15 @@ export function WhsControlCenterDashboard() {
           search: debouncedSearchQuery,
         })
 
-        const response = await fetch(`${API_BASE_URL}/api/whs/cases?${params.toString()}`, {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        })
+        const result = await apiClient.get<{ cases: Case[]; summary: Summary }>(
+          `${API_ROUTES.WHS.CASES}?${params.toString()}`
+        )
 
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}))
-          throw new Error(errorData.error || 'Failed to fetch cases')
+        if (isApiError(result)) {
+          throw new Error(getApiErrorMessage(result) || 'Failed to fetch cases')
         }
 
-        const data = await response.json()
+        const data = result.data
         
         // Only update state if component is still mounted
         if (isMounted) {
@@ -195,18 +197,15 @@ export function WhsControlCenterDashboard() {
       const fetchClinicians = async () => {
         try {
           setLoadingClinicians(true)
-          const response = await fetch(`${API_BASE_URL}/api/whs/clinicians`, {
-            method: 'GET',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-          })
+          const result = await apiClient.get<{ clinicians: Clinician[] }>(
+            API_ROUTES.WHS.CLINICIANS
+          )
 
-          if (!response.ok) {
-            throw new Error('Failed to fetch clinicians')
+          if (isApiError(result)) {
+            throw new Error(getApiErrorMessage(result) || 'Failed to fetch clinicians')
           }
 
-          const data = await response.json()
-          setClinicians(data.clinicians || [])
+          setClinicians(result.data.clinicians || [])
         } catch (err: any) {
           console.error('Error fetching clinicians:', err)
           alert(err.message || 'Failed to load clinicians')
@@ -226,21 +225,30 @@ export function WhsControlCenterDashboard() {
 
     try {
       setAssigning(true)
-      const response = await fetch(`${API_BASE_URL}/api/whs/cases/${selectedCase.id}/assign-clinician`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clinician_id: selectedClinicianId }),
-      })
+      const result = await apiClient.post<{ clinician: { name: string } }>(
+        API_ROUTES.WHS.CASE_ASSIGN_CLINICIAN(selectedCase.id),
+        { clinician_id: selectedClinicianId }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to assign case')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to assign case')
       }
 
+      const clinicianName = result.data.clinician?.name || 'Clinician'
+      
       setShowAssignModal(false)
       setSelectedCase(null)
       setSelectedClinicianId('')
+      
+      // Show success toast
+      setSuccessMessage(`Case successfully assigned to ${clinicianName}`)
+      setShowSuccessToast(true)
+      
+      // Auto-hide toast after 3 seconds
+      setTimeout(() => {
+        setShowSuccessToast(false)
+      }, 3000)
+      
       handleRefresh()
     } catch (err: any) {
       console.error('Error assigning case:', err)
@@ -550,8 +558,7 @@ export function WhsControlCenterDashboard() {
                             <button 
                               className="whs-action-btn"
                               onClick={() => {
-                                setSelectedCase(caseItem)
-                                setShowViewModal(true)
+                                navigate(PROTECTED_ROUTES.WHS_CONTROL_CENTER.CASE_DETAIL.replace(':caseId', caseItem.id))
                               }}
                               title="View case details"
                             >
@@ -608,149 +615,6 @@ export function WhsControlCenterDashboard() {
           </div>
         )}
       </div>
-
-      {/* View Case Details Modal */}
-      {showViewModal && selectedCase && (
-        <div className="whs-modal-overlay" onClick={() => setShowViewModal(false)}>
-          <div className="whs-modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="whs-modal-header">
-              <div>
-                <h2 className="whs-modal-title">Case Details</h2>
-                <p className="whs-modal-subtitle">{selectedCase.caseNumber}</p>
-              </div>
-              <button 
-                className="whs-modal-close"
-                onClick={() => setShowViewModal(false)}
-                aria-label="Close modal"
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="18" y1="6" x2="6" y2="18"></line>
-                  <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-              </button>
-            </div>
-
-            <div className="whs-modal-body">
-              <div className="whs-details-grid">
-                <div className="whs-detail-section">
-                  <h3 className="whs-detail-section-title">Case Information</h3>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Case Number:</span>
-                    <span className="whs-detail-value">{selectedCase.caseNumber}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Status:</span>
-                    {(() => {
-                      const statusStyleObj = getStatusStyle(selectedCase.status)
-                      const statusStyle = { backgroundColor: statusStyleObj.bg, color: statusStyleObj.color }
-                      return (
-                        <span className="whs-status-badge" style={statusStyle}>
-                          {selectedCase.status}
-                        </span>
-                      )
-                    })()}
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Severity:</span>
-                    {(() => {
-                      const severityStyleObj = getSeverityStyle(selectedCase.severity)
-                      const severityStyle = { backgroundColor: severityStyleObj.bg, color: severityStyleObj.color }
-                      return (
-                        <span className="whs-severity-badge" style={severityStyle}>
-                          {selectedCase.severity}
-                        </span>
-                      )
-                    })()}
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Incident Type:</span>
-                    <span className="whs-detail-value">{TYPE_LABELS[selectedCase.type] || selectedCase.type}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Created:</span>
-                    <span className="whs-detail-value">{formatDate(selectedCase.createdAt)}</span>
-                  </div>
-                  {(selectedCase.status === 'CLOSED' || selectedCase.status === 'RETURN TO WORK') && selectedCase.approvedBy && (
-                    <div className="whs-detail-item">
-                      <span className="whs-detail-label">Approved by:</span>
-                      <span className="whs-detail-value" style={{ color: '#10B981', fontWeight: 600 }}>
-                        {selectedCase.approvedBy}
-                      </span>
-                    </div>
-                  )}
-                  {(selectedCase.status === 'CLOSED' || selectedCase.status === 'RETURN TO WORK') && selectedCase.approvedAt && (
-                    <div className="whs-detail-item">
-                      <span className="whs-detail-label">Approved at:</span>
-                      <span className="whs-detail-value">{formatDate(selectedCase.approvedAt)}</span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="whs-detail-section">
-                  <h3 className="whs-detail-section-title">Worker Information</h3>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Name:</span>
-                    <span className="whs-detail-value">{selectedCase.workerName}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Email:</span>
-                    <span className="whs-detail-value">{selectedCase.workerEmail}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Team:</span>
-                    <span className="whs-detail-value">{selectedCase.teamName}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Team Leader:</span>
-                    <span className="whs-detail-value">{selectedCase.teamLeaderName || 'N/A'}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Site Location:</span>
-                    <span className="whs-detail-value">{selectedCase.siteLocation || 'N/A'}</span>
-                  </div>
-                </div>
-
-                <div className="whs-detail-section">
-                  <h3 className="whs-detail-section-title">Incident Details</h3>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Start Date:</span>
-                    <span className="whs-detail-value">{formatDate(selectedCase.startDate)}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">End Date:</span>
-                    <span className="whs-detail-value">{selectedCase.endDate ? formatDate(selectedCase.endDate) : 'Ongoing'}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Reason:</span>
-                    <span className="whs-detail-value">{selectedCase.reason || 'No reason provided'}</span>
-                  </div>
-                </div>
-
-                <div className="whs-detail-section">
-                  <h3 className="whs-detail-section-title">Supervisor Information</h3>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Supervisor:</span>
-                    <span className="whs-detail-value">{selectedCase.supervisorName}</span>
-                  </div>
-                  <div className="whs-detail-item">
-                    <span className="whs-detail-label">Last Updated:</span>
-                    <span className="whs-detail-value">{formatDate(selectedCase.updatedAt)}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="whs-modal-footer">
-              <button 
-                className="whs-modal-close-btn"
-                onClick={() => setShowViewModal(false)}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Assign to Clinician Modal */}
       {showAssignModal && selectedCase && (
@@ -840,6 +704,18 @@ export function WhsControlCenterDashboard() {
                 {assigning ? 'Assigning...' : 'Assign Case'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Toast Notification */}
+      {showSuccessToast && (
+        <div className="success-toast">
+          <div className="success-toast-content">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span>{successMessage}</span>
           </div>
         </div>
       )}

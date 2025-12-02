@@ -19,7 +19,7 @@ export function Login() {
   const [toastMessage, setToastMessage] = useState('')
   const [toastType, setToastType] = useState<'success' | 'error'>('success')
   const navigate = useNavigate()
-  const { setRole, refreshAuth, setUserFromLogin } = useAuth()
+  const { setRole, refreshAuth } = useAuth()
 
   const showToastMessage = (message: string, type: 'success' | 'error' = 'success') => {
     setToastMessage(message)
@@ -53,8 +53,7 @@ export function Login() {
 
       if (isApiError(result)) {
         // Display the error message from the backend (e.g., "Invalid email or password")
-        const errorMsg = getApiErrorMessage(result) || 'Failed to sign in. Please try again.'
-        showToastMessage(errorMsg, 'error')
+        showToastMessage(getApiErrorMessage(result) || 'Failed to sign in. Please try again.', 'error')
         setLoading(false)
         return
       }
@@ -67,47 +66,9 @@ export function Login() {
 
       // Show success toast before redirecting
       showToastMessage('Login successful! Redirecting...', 'success')
-      
-      // MOBILE FIX: Store token in localStorage as fallback for Safari
-      // Safari on iOS often blocks cross-domain cookies, so we need this fallback
-      if ((result.data as any).token) {
-        try {
-          localStorage.setItem('auth_token', (result.data as any).token)
-          if ((result.data as any).refresh_token) {
-            localStorage.setItem('auth_refresh_token', (result.data as any).refresh_token)
-          }
-          console.log('[Login] Token stored in localStorage for mobile fallback')
-          console.log('[Login] Token length:', (result.data as any).token.length)
-          // Verify it was stored
-          const stored = localStorage.getItem('auth_token')
-          console.log('[Login] Verification - token in localStorage:', stored ? `YES (length: ${stored.length})` : 'NO')
-        } catch (e) {
-          console.error('[Login] Failed to store token in localStorage:', e)
-        }
-      } else {
-        console.log('[Login] No token in response - cookies only mode')
-      }
-      
-      // Set user state immediately from login response (before cookies are processed)
-      // This prevents redirect back to login page on mobile
-      setUserFromLogin({
-        id: result.data.user.id,
-        email: result.data.user.email,
-        role: result.data.user.role,
-        first_name: result.data.user.first_name,
-        last_name: result.data.user.last_name,
-        full_name: result.data.user.full_name,
-      })
-      
-      // Wait longer for cookies to be set (especially important for mobile)
-      // Mobile browsers need more time to process cross-domain cookies
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      
-      // Refresh auth in background to get full user data (non-blocking)
-      refreshAuth().catch(err => {
-        console.warn('[EmailLogin] Background refreshAuth failed:', err)
-        // Don't block navigation - user is already set from login response
-      })
+      setRole(result.data.user.role)
+      await refreshAuth()
+      await new Promise(resolve => setTimeout(resolve, 500))
       
       navigate(getDashboardRoute(result.data.user.role as any), { replace: true })
     } catch (err: any) {
@@ -150,27 +111,9 @@ export function Login() {
 
       // Show success toast before redirecting
       showToastMessage('Login successful! Redirecting...', 'success')
-      
-      // Set user state immediately from login response (before cookies are processed)
-      // This prevents redirect back to login page
-      setUserFromLogin({
-        id: result.data.user.id,
-        email: result.data.user.email,
-        role: result.data.user.role,
-        first_name: result.data.user.first_name,
-        last_name: result.data.user.last_name,
-        full_name: result.data.user.full_name,
-      })
-      
-      // Wait longer for cookies to be set (especially important for mobile)
-      // Mobile browsers need more time to process cross-domain cookies
-      await new Promise(resolve => setTimeout(resolve, 1500))
-      
-      // Refresh auth in background to get full user data (non-blocking)
-      refreshAuth().catch(err => {
-        console.warn('[QuickLogin] Background refreshAuth failed:', err)
-        // Don't block navigation - user is already set from login response
-      })
+      setRole(result.data.user.role)
+      await refreshAuth()
+      await new Promise(resolve => setTimeout(resolve, 500))
       
       navigate(getDashboardRoute(result.data.user.role as any), { replace: true })
     } catch (err: any) {

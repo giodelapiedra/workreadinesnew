@@ -338,6 +338,25 @@
   background-color: #fee2e2;
 }
 
+.btn-sm.btn-edit {
+  background-color: #f3f4f6;
+  border-color: #d1d5db;
+  color: #374151;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.btn-sm.btn-edit:hover {
+  background-color: #e5e7eb;
+  border-color: #9ca3af;
+  color: #111827;
+}
+
+.btn-sm.btn-edit svg {
+  flex-shrink: 0;
+}
+
 .appointment-details {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -561,6 +580,13 @@
   border-color: #111827;
 }
 
+.form-input-disabled {
+  background-color: #f3f4f6 !important;
+  color: #6b7280 !important;
+  cursor: not-allowed !important;
+  opacity: 0.7;
+}
+
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -596,7 +622,199 @@
   cursor: not-allowed;
 }
 
+/* Success Toast Notification */
+.success-toast {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 10001;
+  animation: slideInRightToast 0.3s ease-out;
+}
+
+.success-toast-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #10B981;
+  color: white;
+  padding: 16px 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  min-width: 280px;
+  max-width: 400px;
+}
+
+.success-toast-content svg {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.1));
+}
+
+.success-toast-content span {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.5;
+  flex: 1;
+}
+
+@keyframes slideInRightToast {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slideOutRightToast {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* Delete Confirmation Modal */
+.delete-confirmation-modal {
+  max-width: 500px;
+  width: 90%;
+  animation: modalSlideIn 0.3s ease-out;
+}
+
+.delete-confirmation-header {
+  padding: 32px;
+  text-align: center;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.delete-confirmation-header svg {
+  margin: 0 auto 16px;
+}
+
+.delete-confirmation-header h3 {
+  margin: 0 0 8px 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #0F172A;
+}
+
+.delete-confirmation-header p {
+  margin: 0;
+  font-size: 14px;
+  color: #64748B;
+  line-height: 1.5;
+}
+
+.delete-confirmation-info {
+  padding: 24px 32px;
+  background: #F8FAFC;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.delete-confirmation-detail {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 0;
+}
+
+.delete-confirmation-detail .label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #64748B;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.delete-confirmation-detail .value {
+  font-size: 14px;
+  color: #0F172A;
+  font-weight: 500;
+}
+
+.delete-confirmation-actions {
+  padding: 24px 32px;
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.btn-danger {
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+  background: #EF4444;
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #DC2626;
+}
+
+.btn-danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@keyframes modalSlideIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
 /* Responsive */
+@media (max-width: 768px) {
+  .success-toast {
+    top: 16px;
+    right: 16px;
+    left: 16px;
+  }
+
+  .success-toast-content {
+    min-width: auto;
+    max-width: 100%;
+  }
+
+  .delete-confirmation-modal {
+    width: 95%;
+  }
+
+  .delete-confirmation-header {
+    padding: 24px;
+  }
+
+  .delete-confirmation-info {
+    padding: 20px 24px;
+  }
+
+  .delete-confirmation-actions {
+    padding: 20px 24px;
+    flex-direction: column;
+  }
+
+  .btn-danger,
+  .btn-secondary {
+    width: 100%;
+  }
+}
+
 @media (max-width: 768px) {
   .appointment-management {
     padding: 1rem;

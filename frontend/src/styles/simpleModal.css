@@ -1,0 +1,124 @@
+/* Shared simple modal styles */
+.supervisor-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.supervisor-modal-content {
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 24px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.supervisor-modal-content h2 {
+  margin-top: 0;
+  margin-bottom: 20px;
+  font-size: 20px;
+  font-weight: 600;
+  color: #0d0d0d;
+  letter-spacing: -0.01em;
+}
+
+.supervisor-modal-content label {
+  display: block;
+  margin-bottom: 6px;
+  font-weight: 500;
+  font-size: 13px;
+  color: #0d0d0d;
+}
+
+.supervisor-modal-content input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #dfe1e6;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #0d0d0d;
+  background: #ffffff;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+
+.supervisor-modal-content input:focus {
+  outline: none;
+  border-color: #0d0d0d;
+  box-shadow: 0 0 0 3px rgba(13, 13, 13, 0.1);
+}
+
+.supervisor-modal-content input:disabled {
+  background: #f7f8f9;
+  color: #6e7681;
+  cursor: not-allowed;
+}
+
+.supervisor-modal-error {
+  padding: 12px;
+  background: #ffeeee;
+  color: #cc0000;
+  border-radius: 6px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  border: 1px solid #ffcccc;
+}
+
+.supervisor-modal-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.supervisor-modal-actions button {
+  flex: 1;
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: none;
+}
+
+.supervisor-modal-actions button:first-child {
+  background: transparent;
+  color: #6e7681;
+  border: 1px solid #dfe1e6;
+}
+
+.supervisor-modal-actions button:first-child:hover {
+  background: #f7f8f9;
+  border-color: #c1c7d0;
+  color: #0d0d0d;
+}
+
+.supervisor-modal-actions button:last-child {
+  background: #0d0d0d;
+  color: #ffffff;
+}
+
+.supervisor-modal-actions button:last-child:hover:not(:disabled) {
+  background: #1a1a1a;
+}
+
+.supervisor-modal-actions button:disabled {
+  background: #f7f8f9;
+  color: #c1c7d0;
+  cursor: not-allowed;
+}
+
+.supervisor-modal-actions button:active:not(:disabled) {
+  transform: scale(0.98);
+}

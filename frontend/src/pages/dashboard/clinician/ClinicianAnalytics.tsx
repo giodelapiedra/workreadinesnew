@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
-import { useAuth } from '../../../contexts/AuthContext'
+import { formatDate } from '../../../shared/date'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import {
   AreaChart,
   Area,
@@ -117,25 +118,33 @@ const TYPE_LABELS: Record<string, string> = {
 }
 
 export function ClinicianAnalytics() {
-  const { first_name, full_name, user } = useAuth()
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
-  const [dateRange, setDateRange] = useState<{ start: string; end: string }>(() => {
+  
+  // Initialize with "this month" by default - Use formatDate to avoid timezone issues
+  const getThisMonthDates = useCallback(() => {
     const today = new Date()
-    const thirtyDaysAgo = new Date(today)
-    thirtyDaysAgo.setDate(today.getDate() - 30)
+    const firstDay = new Date(today.getFullYear(), today.getMonth(), 1)
     return {
-      start: thirtyDaysAgo.toISOString().split('T')[0],
-      end: today.toISOString().split('T')[0],
+      start: formatDate(firstDay),
+      end: formatDate(today)
     }
-  })
+  }, [])
+  
+  const [dateRange, setDateRange] = useState<{ start: string; end: string }>(getThisMonthDates)
   const [showDateFilter, setShowDateFilter] = useState(false)
   const [rawCases, setRawCases] = useState<Case[]>([])
   const [rawPlans, setRawPlans] = useState<RehabilitationPlan[]>([])
 
-  const userName = first_name || full_name || user?.email?.split('@')[0] || 'Dr. Clinician'
+  // Memoize today's date string to avoid repeated calculations
+  const todayStr = useMemo(() => formatDate(new Date()), [])
+
+  // Helper function for date display formatting
+  const formatDateDisplay = useCallback((dateStr: string) => {
+    return new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  }, [])
 
   // Optimized: Pre-parse dates once
   const dateRangeBounds = useMemo(() => {
@@ -152,7 +161,7 @@ export function ClinicianAnalytics() {
     
     // Pre-parse all item dates once (optimization)
     const itemDates = new Map<any, number>()
-    items.forEach((item, index) => {
+    items.forEach((item) => {
       const dateStr = item[dateField]
       if (dateStr) {
         itemDates.set(item, new Date(dateStr).getTime())
@@ -282,40 +291,7 @@ export function ClinicianAnalytics() {
       })
     }
 
-    // Weekly trends - optimized with pre-parsed dates
-    const weeklyTrends: Array<{ week: string; cases: number; plans: number; completed: number }> = []
-    const weeks = Math.ceil(daysDiff / 7)
-    const maxWeeks = Math.min(weeks, 12)
-    
-    // Pre-parse dates once (optimization)
-    const caseDates = filteredCases.map(c => new Date(c.createdAt).getTime())
-    const planStartDates = filteredPlans.map(p => new Date(p.startDate).getTime())
-    const completedDates = filteredPlans
-      .filter(p => p.status === 'completed' && p.endDate)
-      .map(p => new Date(p.endDate!).getTime())
-    
-    for (let i = 0; i < maxWeeks; i++) {
-      const weekStart = new Date(startDate)
-      weekStart.setDate(startDate.getDate() + (i * 7))
-      let weekEnd = new Date(weekStart)
-      weekEnd.setDate(weekEnd.getDate() + 6)
-      if (weekEnd > endDate) weekEnd = endDate
-
-      const weekStartTime = weekStart.getTime()
-      const weekEndTime = weekEnd.getTime()
-
-      // Count using pre-parsed dates (faster than filtering)
-      const weekCases = caseDates.filter(time => time >= weekStartTime && time <= weekEndTime).length
-      const weekPlans = planStartDates.filter(time => time >= weekStartTime && time <= weekEndTime).length
-      const weekCompleted = completedDates.filter(time => time >= weekStartTime && time <= weekEndTime).length
-
-      weeklyTrends.push({
-        week: `Week ${i + 1}`,
-        cases: weekCases,
-        plans: weekPlans,
-        completed: weekCompleted,
-      })
-    }
+    // Weekly trends - removed as not displayed in UI (only daily trends are shown)
 
     // Worker recovery statistics
     const workerMap = new Map<string, { cases: Case[]; plans: RehabilitationPlan[] }>()
@@ -393,36 +369,30 @@ export function ClinicianAnalytics() {
       },
       trends: {
         daily: dailyTrends,
-        weekly: weeklyTrends,
+        weekly: [], // Not displayed in UI, kept for interface compatibility
       },
       workerRecovery,
       typeDistribution,
       priorityDistribution,
     }
-  }, [dateRange, filterByDateRange])
+  }, [filterByDateRange, dateRangeBounds])
 
   const fetchAnalytics = useCallback(async () => {
     try {
       setLoading(true)
       setError('')
 
-      const [casesRes, plansRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/api/clinician/cases?status=all&limit=1000`, {
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-        }),
-        fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans?status=all`, {
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-        }),
+      const [casesResult, plansResult] = await Promise.all([
+        apiClient.get<{ cases: Case[] }>(`${API_ROUTES.CLINICIAN.CASES}?status=all&limit=1000`),
+        apiClient.get<{ plans: RehabilitationPlan[] }>(`${API_ROUTES.CLINICIAN.REHABILITATION_PLANS}?status=all`),
       ])
 
-      if (!casesRes.ok || !plansRes.ok) {
+      if (isApiError(casesResult) || isApiError(plansResult)) {
         throw new Error('Failed to fetch analytics data')
       }
 
-      const casesData = await casesRes.json()
-      const plansData = await plansRes.json()
+      const casesData = casesResult.data
+      const plansData = plansResult.data
 
       const cases: Case[] = casesData.cases || []
       const plans: RehabilitationPlan[] = plansData.plans || []
@@ -444,11 +414,11 @@ export function ClinicianAnalytics() {
 
   // Process analytics when raw data or date range changes (optimized - no API call needed)
   useEffect(() => {
-    if (rawCases.length > 0 || rawPlans.length > 0 || dateRange) {
+    if (rawCases.length > 0 || rawPlans.length > 0) {
       const processedData = processAnalyticsData(rawCases, rawPlans)
       setAnalyticsData(processedData)
     }
-  }, [rawCases, rawPlans, processAnalyticsData, dateRange])
+  }, [rawCases, rawPlans, processAnalyticsData])
 
   // Close date filter on outside click
   useEffect(() => {
@@ -469,13 +439,9 @@ export function ClinicianAnalytics() {
   }
 
   const handleResetDateRange = () => {
-    const today = new Date()
-    const thirtyDaysAgo = new Date(today)
-    thirtyDaysAgo.setDate(today.getDate() - 30)
-    setDateRange({
-      start: thirtyDaysAgo.toISOString().split('T')[0],
-      end: today.toISOString().split('T')[0],
-    })
+    // Reset to "this month" instead of last 30 days
+    const thisMonthDates = getThisMonthDates()
+    setDateRange(thisMonthDates)
     setShowDateFilter(false)
   }
 
@@ -544,7 +510,7 @@ export function ClinicianAnalytics() {
                   <line x1="3" y1="10" x2="21" y2="10"></line>
                 </svg>
                 <span>
-                  {new Date(dateRange.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - {new Date(dateRange.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  {formatDateDisplay(dateRange.start)} - {formatDateDisplay(dateRange.end)}
                 </span>
               </button>
               {showDateFilter && (
@@ -580,18 +546,18 @@ export function ClinicianAnalytics() {
                         value={dateRange.end}
                         onChange={(e) => {
                           const newEnd = e.target.value
-                          if (newEnd >= dateRange.start && newEnd <= new Date().toISOString().split('T')[0]) {
+                          if (newEnd >= dateRange.start && newEnd <= todayStr) {
                             setDateRange(prev => ({ ...prev, end: newEnd }))
                           }
                         }}
                         min={dateRange.start}
-                        max={new Date().toISOString().split('T')[0]}
+                        max={todayStr}
                       />
                     </div>
                   </div>
                   <div className="date-filter-footer">
                     <button className="date-filter-reset" onClick={handleResetDateRange}>
-                      Reset to Last 30 Days
+                      Reset to This Month
                     </button>
                     <button className="date-filter-apply" onClick={() => setShowDateFilter(false)}>
                       Apply
@@ -650,7 +616,7 @@ export function ClinicianAnalytics() {
             <div className="chart-header">
               <h3>Activity Trends</h3>
               <span className="chart-period">
-                {new Date(dateRange.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - {new Date(dateRange.end).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                {formatDateDisplay(dateRange.start)} - {formatDateDisplay(dateRange.end)}
               </span>
             </div>
             <ResponsiveContainer width="100%" height={280}>

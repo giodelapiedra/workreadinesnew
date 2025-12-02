@@ -1,0 +1,410 @@
+/* My Accidents Page - View Only */
+
+.my-accidents-container {
+  padding: 32px;
+  min-height: calc(100vh - 64px);
+  background: #f9fafb;
+}
+
+/* Header */
+.my-accidents-header {
+  margin-bottom: 24px;
+}
+
+.my-accidents-title {
+  font-size: 32px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 4px 0;
+  letter-spacing: -0.5px;
+}
+
+.my-accidents-subtitle {
+  font-size: 16px;
+  color: #6b7280;
+  margin: 0;
+}
+
+/* Controls Bar */
+.my-accidents-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.my-accidents-search {
+  position: relative;
+  flex: 1;
+  min-width: 300px;
+  max-width: 600px;
+}
+
+.search-icon {
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #9ca3af;
+  pointer-events: none;
+}
+
+.search-input {
+  width: 100%;
+  padding: 12px 16px 12px 48px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 14px;
+  background: white;
+  transition: all 0.2s ease;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.search-input::placeholder {
+  color: #9ca3af;
+}
+
+.active-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  background: #f3f4f6;
+  color: #374151;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.active-toggle:hover {
+  background: #e5e7eb;
+  border-color: #d1d5db;
+}
+
+.active-toggle.active {
+  background: #10b981;
+  color: white;
+  border-color: #10b981;
+}
+
+.active-toggle.active:hover {
+  background: #059669;
+  border-color: #059669;
+}
+
+.active-toggle svg {
+  flex-shrink: 0;
+}
+
+/* Error State */
+.my-accidents-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #dc2626;
+  margin-bottom: 24px;
+  font-size: 14px;
+}
+
+.my-accidents-error svg {
+  flex-shrink: 0;
+}
+
+/* Empty State */
+.my-accidents-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  text-align: center;
+  background: white;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+}
+
+.my-accidents-empty svg {
+  color: #d1d5db;
+  margin-bottom: 24px;
+}
+
+.my-accidents-empty h2 {
+  font-size: 24px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0 0 8px 0;
+}
+
+.my-accidents-empty p {
+  font-size: 16px;
+  color: #6b7280;
+  margin: 0;
+  max-width: 400px;
+}
+
+/* Table Wrapper */
+.my-accidents-table-wrapper {
+  background: white;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.my-accidents-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.my-accidents-table thead {
+  background: #f3f4f6;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.my-accidents-table th {
+  padding: 16px;
+  text-align: left;
+  font-weight: 600;
+  color: #374151;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.my-accidents-table tbody tr {
+  border-bottom: 1px solid #f3f4f6;
+  transition: background-color 0.15s ease;
+}
+
+.my-accidents-table tbody tr:hover {
+  background: #f9fafb;
+}
+
+.my-accidents-table tbody tr:last-child {
+  border-bottom: none;
+}
+
+.my-accidents-table td {
+  padding: 16px;
+  color: #374151;
+  vertical-align: middle;
+}
+
+/* Table Cell Styles */
+.case-number-cell {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.case-number {
+  font-weight: 500;
+  color: #111827;
+}
+
+.case-type {
+  font-weight: 500;
+  color: #111827;
+}
+
+.case-reason {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #6b7280;
+}
+
+.case-status {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.case-priority {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.case-date {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.view-case-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.view-case-btn:hover {
+  background: #2563eb;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(59, 130, 246, 0.2);
+}
+
+.view-case-btn:active {
+  transform: translateY(0);
+}
+
+.view-case-btn svg {
+  flex-shrink: 0;
+}
+
+/* Pagination */
+.my-accidents-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px;
+  background: white;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.pagination-info {
+  font-size: 14px;
+  color: #6b7280;
+  font-weight: 500;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination-page-info {
+  font-size: 14px;
+  color: #374151;
+  font-weight: 500;
+  padding: 0 12px;
+}
+
+.pagination-btn {
+  min-width: 36px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: white;
+  color: #374151;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pagination-btn:hover:not(:disabled) {
+  background: #f3f4f6;
+  border-color: #d1d5db;
+}
+
+.pagination-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Responsive Design */
+@media (max-width: 1200px) {
+  .my-accidents-table-wrapper {
+    overflow-x: auto;
+  }
+
+  .my-accidents-table {
+    min-width: 1000px;
+  }
+}
+
+@media (max-width: 768px) {
+  .my-accidents-container {
+    padding: 20px;
+  }
+
+  .my-accidents-title {
+    font-size: 24px;
+  }
+
+  .my-accidents-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .my-accidents-search {
+    max-width: 100%;
+  }
+
+  .my-accidents-pagination {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pagination-controls {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 640px) {
+  .my-accidents-table th,
+  .my-accidents-table td {
+    padding: 12px 8px;
+    font-size: 13px;
+  }
+
+  .view-case-btn {
+    padding: 4px 12px;
+    font-size: 12px;
+  }
+}
+
+
+
+
+
+
+
+
+
+

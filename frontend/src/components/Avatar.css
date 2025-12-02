@@ -1,0 +1,206 @@
+/**
+ * Avatar Component Styles
+ * Centralized styling for all avatar displays
+ */
+
+/* Base Avatar Styles */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+  /* No background - only show color when no image (fallback) */
+  background: transparent;
+  color: #FFFFFF;
+  font-weight: 600;
+  user-select: none;
+  transition: all 0.2s ease;
+  /* CRITICAL: Ensure perfect circle - prevent oblong */
+  aspect-ratio: 1 / 1;
+  box-sizing: border-box;
+}
+
+/* Size Variants - Using min/max to prevent stretching */
+.avatar-xs {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  min-height: 24px;
+  max-width: 24px;
+  max-height: 24px;
+  font-size: 10px;
+}
+
+.avatar-sm {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  min-height: 32px;
+  max-width: 32px;
+  max-height: 32px;
+  font-size: 12px;
+}
+
+.avatar-md {
+  width: 40px;
+  height: 40px;
+  min-width: 40px;
+  min-height: 40px;
+  max-width: 40px;
+  max-height: 40px;
+  font-size: 14px;
+}
+
+.avatar-lg {
+  width: 56px;
+  height: 56px;
+  min-width: 56px;
+  min-height: 56px;
+  max-width: 56px;
+  max-height: 56px;
+  font-size: 18px;
+}
+
+.avatar-xl {
+  width: 80px;
+  height: 80px;
+  min-width: 80px;
+  min-height: 80px;
+  max-width: 80px;
+  max-height: 80px;
+  font-size: 24px;
+}
+
+/* Shape Variants */
+.avatar-circle {
+  border-radius: 50%;
+}
+
+.avatar-rounded {
+  border-radius: 12px;
+}
+
+.avatar-square {
+  border-radius: 6px;
+}
+
+/* Avatar Image - Ensures face is visible regardless of image size */
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Center top positioning ensures face is visible */
+  object-position: center 20%;
+  border-radius: inherit;
+  /* Smooth loading transition */
+  opacity: 1;
+  transition: opacity 0.2s ease-in-out;
+  /* Prevent image from being stretched */
+  aspect-ratio: 1 / 1;
+}
+
+.avatar-img[loading] {
+  opacity: 0.5;
+}
+
+/* Avatar Fallback (Initials) - Only this has background color */
+.avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  /* Background color only for initials (when no image) */
+  background: #3B82F6;
+  color: #FFFFFF;
+  border-radius: inherit;
+}
+
+/* Clickable Avatar */
+.avatar-clickable {
+  cursor: pointer;
+}
+
+.avatar-clickable:hover {
+  opacity: 0.9;
+  transform: scale(1.05);
+}
+
+.avatar-clickable:active {
+  transform: scale(0.98);
+}
+
+/* Avatar Group */
+.avatar-group {
+  display: inline-flex;
+  align-items: center;
+  padding-left: 8px;
+}
+
+.avatar-group .avatar {
+  margin-left: -8px;
+  border: 2px solid #FFFFFF;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.avatar-group .avatar:first-child {
+  margin-left: 0;
+}
+
+.avatar-group .avatar:hover {
+  z-index: 1;
+  transform: translateY(-2px);
+}
+
+/* Avatar Count (for overflow) */
+.avatar-count {
+  background: #94A3B8;
+  font-size: 11px;
+  z-index: 0;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .avatar-xl {
+    width: 64px;
+    height: 64px;
+    min-width: 64px;
+    min-height: 64px;
+    max-width: 64px;
+    max-height: 64px;
+    font-size: 20px;
+  }
+  
+  .avatar-lg {
+    width: 48px;
+    height: 48px;
+    min-width: 48px;
+    min-height: 48px;
+    max-width: 48px;
+    max-height: 48px;
+    font-size: 16px;
+  }
+}
+
+/* Accessibility */
+.avatar:focus-visible {
+  outline: 2px solid #3B82F6;
+  outline-offset: 2px;
+}
+
+/* Print Styles */
+@media print {
+  .avatar {
+    break-inside: avoid;
+  }
+  
+  .avatar-img {
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+}

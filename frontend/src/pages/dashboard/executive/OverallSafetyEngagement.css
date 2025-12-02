@@ -1,0 +1,611 @@
+/* Overall Safety Engagement Page - Professional Design */
+.safety-engagement-container {
+  background-color: #FFFFFF;
+  min-height: 100vh;
+  padding: 32px;
+  max-width: 1400px;
+  margin: 0 auto;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+}
+
+/* Header */
+.safety-engagement-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 32px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.safety-engagement-title {
+  font-size: 24px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0 0 6px 0;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.safety-engagement-subtitle {
+  font-size: 14px;
+  color: #6B7280;
+  margin: 0;
+  font-weight: 400;
+}
+
+.safety-engagement-refresh-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: #FFFFFF;
+  border: 1px solid #D1D5DB;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  color: #6B7280;
+}
+
+.safety-engagement-refresh-btn:hover {
+  background: #F9FAFB;
+  border-color: #9CA3AF;
+  color: #111827;
+}
+
+.safety-engagement-refresh-btn:active {
+  transform: scale(0.95);
+}
+
+.safety-engagement-refresh-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Main Card - Professional Design */
+.safety-engagement-main-card {
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
+  padding: 32px;
+  margin-bottom: 24px;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  position: relative;
+  overflow: hidden;
+}
+
+.safety-engagement-main-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, #10B981 0%, #059669 100%);
+}
+
+.safety-engagement-main-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+}
+
+.safety-engagement-main-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #374151;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+.safety-engagement-trend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: #ECFDF5;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #059669;
+}
+
+.safety-engagement-trend svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.safety-engagement-main-value {
+  font-size: 72px;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1;
+  margin-bottom: 20px;
+  letter-spacing: -0.03em;
+}
+
+.safety-engagement-main-metrics {
+  display: flex;
+  gap: 32px;
+  padding-top: 20px;
+  border-top: 1px solid #F3F4F6;
+}
+
+.safety-engagement-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.safety-engagement-metric-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #6B7280;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.safety-engagement-metric-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+
+/* Breakdown Cards - Professional Grid */
+.safety-engagement-breakdown {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+
+.safety-engagement-breakdown-card {
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.safety-engagement-breakdown-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.safety-engagement-breakdown-card:hover {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  transform: translateY(-1px);
+  border-color: currentColor;
+}
+
+.safety-engagement-breakdown-card:hover::before {
+  opacity: 1;
+}
+
+.safety-engagement-breakdown-card.green {
+  border-left: 3px solid #10B981;
+}
+
+.safety-engagement-breakdown-card.green:hover {
+  border-color: #10B981;
+}
+
+.safety-engagement-breakdown-card.amber {
+  border-left: 3px solid #F59E0B;
+}
+
+.safety-engagement-breakdown-card.amber:hover {
+  border-color: #F59E0B;
+}
+
+.safety-engagement-breakdown-card.red {
+  border-left: 3px solid #EF4444;
+}
+
+.safety-engagement-breakdown-card.red:hover {
+  border-color: #EF4444;
+}
+
+.safety-engagement-breakdown-card.pending {
+  border-left: 3px solid #9CA3AF;
+}
+
+.safety-engagement-breakdown-card.pending:hover {
+  border-color: #9CA3AF;
+}
+
+.safety-engagement-breakdown-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.safety-engagement-breakdown-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.safety-engagement-breakdown-icon.green {
+  background: #ECFDF5;
+  color: #10B981;
+}
+
+.safety-engagement-breakdown-icon.amber {
+  background: #FFFBEB;
+  color: #F59E0B;
+}
+
+.safety-engagement-breakdown-icon.red {
+  background: #FEF2F2;
+  color: #EF4444;
+}
+
+.safety-engagement-breakdown-icon.pending {
+  background: #F9FAFB;
+  color: #6B7280;
+}
+
+.safety-engagement-breakdown-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.safety-engagement-breakdown-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.safety-engagement-breakdown-value {
+  font-size: 32px;
+  font-weight: 700;
+  color: #111827;
+  line-height: 1;
+  margin-bottom: 6px;
+  letter-spacing: -0.02em;
+}
+
+.safety-engagement-breakdown-card.green .safety-engagement-breakdown-value {
+  color: #10B981;
+}
+
+.safety-engagement-breakdown-card.amber .safety-engagement-breakdown-value {
+  color: #F59E0B;
+}
+
+.safety-engagement-breakdown-card.red .safety-engagement-breakdown-value {
+  color: #EF4444;
+}
+
+.safety-engagement-breakdown-card.pending .safety-engagement-breakdown-value {
+  color: #6B7280;
+}
+
+.safety-engagement-breakdown-label {
+  font-size: 13px;
+  color: #6B7280;
+  font-weight: 400;
+}
+
+/* Summary Stats - Clean Design */
+.safety-engagement-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.safety-engagement-summary-card {
+  background: #F9FAFB;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 20px;
+  transition: all 0.15s ease;
+}
+
+.safety-engagement-summary-card:hover {
+  background: #FFFFFF;
+  border-color: #D1D5DB;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+
+.safety-engagement-summary-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6B7280;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.safety-engagement-summary-value {
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+
+/* Error State */
+.safety-engagement-error {
+  background: #FFFFFF;
+  border: 1px solid #FEE2E2;
+  border-radius: 10px;
+  padding: 32px;
+  text-align: center;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+
+.safety-engagement-error p {
+  color: #DC2626;
+  margin: 0 0 20px 0;
+  font-size: 15px;
+}
+
+.safety-engagement-error button {
+  padding: 10px 20px;
+  background: #EF4444;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.safety-engagement-error button:hover {
+  background: #DC2626;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(239, 68, 68, 0.2);
+}
+
+.safety-engagement-error button:active {
+  transform: translateY(0);
+}
+
+/* Empty State */
+.safety-engagement-empty {
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 64px 32px;
+  text-align: center;
+  color: #6B7280;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+
+.safety-engagement-empty p {
+  font-size: 15px;
+  margin: 0;
+}
+
+/* Date Filter */
+.safety-engagement-date-filter {
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.safety-engagement-date-presets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.safety-engagement-preset-btn {
+  padding: 8px 16px;
+  background: #F9FAFB;
+  border: 1px solid #E5E7EB;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #6B7280;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.safety-engagement-preset-btn:hover {
+  background: #F3F4F6;
+  border-color: #D1D5DB;
+  color: #111827;
+}
+
+.safety-engagement-preset-btn.active {
+  background: #10B981;
+  border-color: #10B981;
+  color: #FFFFFF;
+}
+
+.safety-engagement-date-inputs {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.safety-engagement-date-input {
+  padding: 8px 12px;
+  border: 1px solid #E5E7EB;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #111827;
+  background: #FFFFFF;
+  transition: all 0.15s ease;
+  flex: 1;
+  max-width: 200px;
+}
+
+.safety-engagement-date-input:focus {
+  outline: none;
+  border-color: #10B981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+}
+
+.safety-engagement-date-separator {
+  font-size: 14px;
+  color: #6B7280;
+  font-weight: 500;
+}
+
+/* Chart Card */
+.safety-engagement-chart-card {
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-radius: 12px;
+  padding: 32px;
+  margin-top: 32px;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+}
+
+.safety-engagement-chart-header {
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #F3F4F6;
+}
+
+.safety-engagement-chart-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0 0 6px 0;
+  letter-spacing: -0.01em;
+}
+
+.safety-engagement-chart-subtitle {
+  font-size: 13px;
+  color: #6B7280;
+  margin: 0;
+  font-weight: 400;
+}
+
+.safety-engagement-chart-content {
+  width: 100%;
+  min-height: 320px;
+}
+
+.safety-engagement-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  color: #6B7280;
+  font-size: 14px;
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+  .safety-engagement-container {
+    padding: 24px;
+  }
+
+  .safety-engagement-main-value {
+    font-size: 56px;
+  }
+
+  .safety-engagement-breakdown {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .safety-engagement-container {
+    padding: 20px 16px;
+  }
+
+  .safety-engagement-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 24px;
+    padding-bottom: 20px;
+  }
+
+  .safety-engagement-title {
+    font-size: 22px;
+  }
+
+  .safety-engagement-date-filter {
+    padding: 16px;
+  }
+
+  .safety-engagement-date-presets {
+    gap: 6px;
+  }
+
+  .safety-engagement-preset-btn {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+
+  .safety-engagement-date-inputs {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .safety-engagement-date-input {
+    max-width: 100%;
+  }
+
+  .safety-engagement-date-separator {
+    display: none;
+  }
+
+  .safety-engagement-main-card {
+    padding: 24px;
+  }
+
+  .safety-engagement-main-value {
+    font-size: 48px;
+  }
+
+  .safety-engagement-main-metrics {
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .safety-engagement-breakdown {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .safety-engagement-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .safety-engagement-chart-card {
+    padding: 24px;
+    margin-top: 24px;
+  }
+
+  .safety-engagement-chart-content {
+    min-height: 280px;
+  }
+}
+

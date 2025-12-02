@@ -1,9 +1,15 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { PROTECTED_ROUTES } from '../../../config/routes'
 import { useAuth } from '../../../contexts/AuthContext'
 import { getStatusLabel, getStatusPriority, getStatusInlineStyle } from '../../../utils/caseStatus'
+import { parseNotes } from '../../../utils/notesParser'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { buildUrl } from '../../../utils/queryBuilder'
+import { getTodayDateString } from '../../../shared/date'
 import './ClinicianDashboard.css'
 
 interface Case {
@@ -63,6 +69,8 @@ interface Summary {
   pendingConfirmation: number
 }
 
+// Status labels are imported from utils/caseStatus
+
 const TYPE_LABELS: Record<string, string> = {
   injury: 'Injury',
   accident: 'Accident',
@@ -70,10 +78,9 @@ const TYPE_LABELS: Record<string, string> = {
   other: 'Other',
 }
 
-// Status labels are now imported from utils/caseStatus
-
 export function ClinicianDashboard() {
   const { user, first_name, full_name, business_name } = useAuth()
+  const navigate = useNavigate()
   const [cases, setCases] = useState<Case[]>([])
   const [rehabilitationPlans, setRehabilitationPlans] = useState<RehabilitationPlan[]>([])
   const [summary, setSummary] = useState<Summary>({
@@ -87,16 +94,17 @@ export function ClinicianDashboard() {
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [successMessage, setSuccessMessage] = useState('')
+  const [showSuccessToast, setShowSuccessToast] = useState(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const [showCreatePlanModal, setShowCreatePlanModal] = useState(false)
   const [selectedCaseForPlan, setSelectedCaseForPlan] = useState<Case | null>(null)
-  const [selectedCase, setSelectedCase] = useState<Case | null>(null)
-  const [showViewModal, setShowViewModal] = useState(false)
+  const [showConfirmModal, setShowConfirmModal] = useState(false)
+  const [planToUpdate, setPlanToUpdate] = useState<{ id: string; status: 'completed' | 'cancelled' } | null>(null)
   const [createPlanForm, setCreatePlanForm] = useState({
     plan_name: 'Recovery Plan',
     plan_description: 'Daily recovery exercises and activities',
     duration_days: 7,
-    start_date: new Date().toISOString().split('T')[0], // Default to today (YYYY-MM-DD)
+    start_date: getTodayDateString(), // Default to today (YYYY-MM-DD)
   })
   const [exercises, setExercises] = useState<Array<{
     exercise_name: string
@@ -128,63 +136,129 @@ export function ClinicianDashboard() {
   const [activeTab, setActiveTab] = useState<'open' | 'closed'>('open')
 
   const userName = first_name || full_name || user?.email?.split('@')[0] || 'Dr. Clinician'
+  
+  // OPTIMIZATION: Pending promise cache to prevent duplicate API calls
+  const pendingFetch = useRef<Promise<void> | null>(null)
+  const fetchAbortController = useRef<AbortController | null>(null)
+  const isFetchingRef = useRef(false)
+  // Store fetched data in ref so it persists across remounts
+  const fetchedDataRef = useRef<{ cases: Case[], plans: RehabilitationPlan[], summary: Summary } | null>(null)
 
   // Fetch data
   useEffect(() => {
     let isMounted = true
-    const abortController = new AbortController()
-    abortControllerRef.current = abortController
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
 
     const fetchData = async () => {
-      try {
-        setLoading(true)
-        setError('')
-
-        const [casesRes, plansRes] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/clinician/cases?status=all&limit=100`, {
-            method: 'GET',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            signal: abortController.signal,
-          }),
-          fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans?status=active`, {
-            method: 'GET',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            signal: abortController.signal,
-          }),
-        ])
-
-        if (!isMounted) return
-
-        if (!casesRes.ok || !plansRes.ok) {
-          const errorText = casesRes.ok 
-            ? await plansRes.json().catch(() => ({ error: 'Failed to fetch rehabilitation plans' }))
-            : await casesRes.json().catch(() => ({ error: 'Failed to fetch cases' }))
-          throw new Error(errorText.error || 'Failed to fetch data')
+      // If we already have data in ref, use it immediately
+      if (fetchedDataRef.current) {
+        setCases(fetchedDataRef.current.cases)
+        setRehabilitationPlans(fetchedDataRef.current.plans)
+        setSummary(fetchedDataRef.current.summary)
+        setLoading(false)
+        return
+      }
+      
+      // If already fetching, wait for it to complete
+      if (isFetchingRef.current && pendingFetch.current) {
+        try {
+        await pendingFetch.current
+          // Use cached data if available
+          if (fetchedDataRef.current) {
+            setCases(fetchedDataRef.current.cases)
+            setRehabilitationPlans(fetchedDataRef.current.plans)
+            setSummary(fetchedDataRef.current.summary)
+          }
+          setLoading(false)
+        return
+        } catch (err) {
+          // Continue to fetch if previous one failed
         }
+      }
 
-        const casesData = await casesRes.json()
-        const plansData = await plansRes.json()
+      // Create new abort controller only if we don't have one or it was aborted
+      if (!fetchAbortController.current || fetchAbortController.current.signal.aborted) {
+        fetchAbortController.current = new AbortController()
+        abortControllerRef.current = fetchAbortController.current
+      }
+      
+      const abortController = fetchAbortController.current
+      isFetchingRef.current = true
+      
+      const promise = (async () => {
+        try {
+          setLoading(true)
+          setError('')
+          
+          // Timeout to prevent infinite loading (only if request takes too long)
+          timeoutId = setTimeout(() => {
+            if (isMounted && !abortController.signal.aborted) {
+              console.error('[ClinicianDashboard] Request timeout - taking too long to load')
+              setError('Request timeout. The server is taking too long to respond. Please refresh the page.')
+              setLoading(false)
+              isFetchingRef.current = false
+              abortController.abort()
+            }
+          }, 30000) // 30 second timeout
 
-        if (isMounted) {
+          const [casesResult, plansResult] = await Promise.all([
+            apiClient.get<{ cases: Case[] }>(
+              buildUrl(API_ROUTES.CLINICIAN.CASES, { status: 'all', limit: 100 }),
+              { signal: abortController.signal }
+            ).catch(err => {
+              // Ignore AbortError - it's expected when request is cancelled
+              if (err.name === 'AbortError' || abortController.signal.aborted) {
+                throw err // Re-throw to be caught by outer try-catch
+              }
+              // Check for connection refused (backend not running)
+              if (err.message?.includes('Failed to fetch') || err.message?.includes('ERR_CONNECTION_REFUSED')) {
+                throw new Error('Backend server is not running. Please start the backend server on port 3000.')
+              }
+              console.error('[ClinicianDashboard] Network error fetching cases:', err)
+              throw new Error('Network error: Failed to connect to server')
+            }),
+            apiClient.get<{ plans: RehabilitationPlan[] }>(
+              `${API_ROUTES.CLINICIAN.REHABILITATION_PLANS}?status=active`,
+              { signal: abortController.signal }
+            ).catch(err => {
+              // Ignore AbortError - it's expected when request is cancelled
+              if (err.name === 'AbortError' || abortController.signal.aborted) {
+                throw err // Re-throw to be caught by outer try-catch
+              }
+              // Check for connection refused (backend not running)
+              if (err.message?.includes('Failed to fetch') || err.message?.includes('ERR_CONNECTION_REFUSED')) {
+                throw new Error('Backend server is not running. Please start the backend server on port 3000.')
+              }
+              console.error('[ClinicianDashboard] Network error fetching plans:', err)
+              throw new Error('Network error: Failed to connect to server')
+            }),
+          ])
+
+        // Handle apiClient results
+        let casesData: any = null
+        let plansData: any = null
+        
+        if (isApiError(casesResult)) {
+          throw new Error(getApiErrorMessage(casesResult) || 'Failed to fetch cases')
+        }
+        casesData = casesResult.data
+        
+        if (isApiError(plansResult)) {
+          throw new Error(getApiErrorMessage(plansResult) || 'Failed to fetch rehabilitation plans')
+        }
+        plansData = plansResult.data
+
           // Extract approval information from notes for each case
-          const casesWithApproval = (casesData.cases || []).map((caseItem: any) => {
+        const casesArray = Array.isArray(casesData?.cases) ? casesData.cases : []
+        const casesWithApproval = casesArray.map((caseItem: any) => {
             let approvedBy: string | null = null
             let approvedAt: string | null = null
             
-            if (caseItem.notes) {
-              try {
-                const notesData = JSON.parse(caseItem.notes)
-                if (notesData.approved_by) {
-                  approvedBy = notesData.approved_by
-                }
-                if (notesData.approved_at) {
-                  approvedAt = notesData.approved_at
-                }
-              } catch {
-                // Notes is not JSON, ignore
-              }
+            // OPTIMIZATION: Use centralized notes parser
+            const notesData = parseNotes(caseItem.notes)
+            if (notesData) {
+              approvedBy = notesData.approved_by || null
+              approvedAt = notesData.approved_at || null
             }
             
             return {
@@ -194,42 +268,76 @@ export function ClinicianDashboard() {
             }
           })
           
-          setCases(casesWithApproval)
-          setRehabilitationPlans(plansData.plans || [])
-          setSummary(casesData.summary || {
+        const plansArray = Array.isArray(plansData?.plans) ? plansData.plans : []
+        
+        // Store in ref first (persists across remounts)
+        const newSummary = casesData?.summary || {
             total: 0,
             active: 0,
             completed: 0,
             inRehab: 0,
             pendingConfirmation: 0,
-          })
         }
+        
+        fetchedDataRef.current = {
+          cases: casesWithApproval,
+          plans: plansArray,
+          summary: newSummary
+        }
+        
+        // Always set state, even if unmounted (React will apply it when component remounts)
+        setCases(casesWithApproval)
+        setRehabilitationPlans(plansArray)
+        setSummary(newSummary)
+        setLoading(false)
+        isFetchingRef.current = false
       } catch (err: any) {
         // Don't set error if request was aborted
-        if (err.name === 'AbortError') {
+        if (err.name === 'AbortError' || abortController.signal.aborted) {
+          if (!isMounted) {
+            setLoading(false)
+            isFetchingRef.current = false
+          }
           return
         }
-        console.error('Error fetching data:', err)
+        console.error('[ClinicianDashboard] Error fetching data:', err)
         if (isMounted) {
-          const errorMessage = err.message || 'Failed to load data'
+          const errorMessage = err.message || 'Failed to load data. Please check your connection and try again.'
           setError(errorMessage)
-          // Clear error after 5 seconds
+          // Clear error after 10 seconds
           setTimeout(() => {
             if (isMounted) setError('')
-          }, 5000)
+          }, 10000)
         }
+        // Always clear loading on error
+        setLoading(false)
+        isFetchingRef.current = false
       } finally {
-        if (isMounted) {
-          setLoading(false)
+        if (timeoutId) {
+          clearTimeout(timeoutId)
         }
+        // Only clear loading if fetch actually completed (not aborted)
+        if (!abortController.signal.aborted) {
+          setLoading(false)
+          isFetchingRef.current = false
+        }
+        pendingFetch.current = null
       }
+      })()
+      
+      pendingFetch.current = promise
+      await promise
     }
 
     fetchData()
 
     return () => {
       isMounted = false
-      abortController.abort()
+      if (timeoutId) {
+        clearTimeout(timeoutId)
+      }
+      // Don't abort on cleanup - let the fetch complete
+      // The abort controller will be reused if component remounts quickly
     }
   }, [refreshKey])
 
@@ -246,7 +354,7 @@ export function ClinicianDashboard() {
         plan_name: 'Recovery Plan',
         plan_description: 'Daily recovery exercises and activities',
         duration_days: 7,
-        start_date: new Date().toISOString().split('T')[0],
+        start_date: getTodayDateString(),
       })
     } else {
       setShowCaseSelection(true)
@@ -262,7 +370,7 @@ export function ClinicianDashboard() {
       plan_name: 'Recovery Plan',
       plan_description: 'Daily recovery exercises and activities',
       duration_days: 7,
-      start_date: new Date().toISOString().split('T')[0],
+      start_date: getTodayDateString(),
     })
     setExercises([
       {
@@ -281,7 +389,7 @@ export function ClinicianDashboard() {
       plan_name: 'Recovery Plan',
       plan_description: 'Daily recovery exercises and activities',
       duration_days: 7,
-      start_date: new Date().toISOString().split('T')[0],
+      start_date: getTodayDateString(),
     })
     setExercises([
       {
@@ -301,7 +409,7 @@ export function ClinicianDashboard() {
       plan_name: 'Recovery Plan',
       plan_description: 'Daily recovery exercises and activities',
       duration_days: 7,
-      start_date: new Date().toISOString().split('T')[0],
+      start_date: getTodayDateString(),
     })
     setExercises([
       {
@@ -405,19 +513,10 @@ export function ClinicianDashboard() {
       // Ensure start_date is in YYYY-MM-DD format
       const startDateFormatted = createPlanForm.start_date.split('T')[0]
       
-      console.log('[DEBUG] Submitting plan with:', {
-        exception_id: selectedCaseForPlan.id,
-        plan_name: createPlanForm.plan_name,
-        duration_days: createPlanForm.duration_days,
-        start_date: startDateFormatted,
-        exercises_count: validExercises.length
-      })
 
-      const response = await fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.CLINICIAN.REHABILITATION_PLANS,
+        {
           exception_id: selectedCaseForPlan.id,
           plan_name: createPlanForm.plan_name.trim(),
           plan_description: createPlanForm.plan_description?.trim() || '',
@@ -429,12 +528,11 @@ export function ClinicianDashboard() {
             instructions: ex.instructions?.trim() || '',
             video_url: ex.video_url?.trim() || '',
           })),
-        }),
-      })
+        }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to create plan')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to create plan')
       }
 
       setSuccessMessage('Rehabilitation plan created successfully')
@@ -451,39 +549,54 @@ export function ClinicianDashboard() {
     }
   }
 
-  const handleUpdatePlanStatus = async (planId: string, status: 'completed' | 'cancelled') => {
-    if (!confirm(`Are you sure you want to ${status === 'completed' ? 'complete' : 'cancel'} this rehabilitation plan?`)) {
-      return
-    }
+  const handleUpdatePlanStatus = (planId: string, status: 'completed' | 'cancelled') => {
+    setPlanToUpdate({ id: planId, status })
+    setShowConfirmModal(true)
+  }
+
+  const handleConfirmPlanStatusUpdate = async () => {
+    if (!planToUpdate) return
 
     setError('')
+    setShowConfirmModal(false)
+    
     try {
       // Validate planId is a valid UUID
       const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-      if (!uuidRegex.test(planId)) {
+      if (!uuidRegex.test(planToUpdate.id)) {
         throw new Error('Invalid plan ID')
       }
 
-      const response = await fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans/${planId}`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-      })
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.CLINICIAN.REHABILITATION_PLAN(planToUpdate.id),
+        { status: planToUpdate.status }
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to update plan')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to update plan')
       }
 
-      setSuccessMessage(`Rehabilitation plan ${status === 'completed' ? 'completed' : 'cancelled'} successfully`)
-      setTimeout(() => setSuccessMessage(''), 3000)
+      // Show toast notification
+      setSuccessMessage(`Rehabilitation plan ${planToUpdate.status === 'completed' ? 'completed' : 'cancelled'} successfully`)
+      setShowSuccessToast(true)
+      setTimeout(() => {
+        setShowSuccessToast(false)
+        setSuccessMessage('')
+      }, 3000)
+      
       handleRefresh()
+      setPlanToUpdate(null)
     } catch (err: any) {
       console.error('Error updating plan:', err)
       setError(err.message || 'Failed to update rehabilitation plan')
       setTimeout(() => setError(''), 5000)
+      setPlanToUpdate(null)
     }
+  }
+
+  const handleCancelConfirmModal = () => {
+    setShowConfirmModal(false)
+    setPlanToUpdate(null)
   }
 
   const handleEditPlan = (plan: RehabilitationPlan) => {
@@ -563,16 +676,13 @@ export function ClinicianDashboard() {
         throw new Error('Invalid plan ID')
       }
 
-      const response = await fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans/${selectedPlanForEdit.id}`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatePayload),
-      })
+      const result = await apiClient.patch<{ message: string }>(
+        API_ROUTES.CLINICIAN.REHABILITATION_PLAN(selectedPlanForEdit.id),
+        updatePayload
+      )
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to update plan')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to update plan')
       }
 
       setSuccessMessage('Rehabilitation plan updated successfully')
@@ -611,18 +721,15 @@ export function ClinicianDashboard() {
         throw new Error('Invalid plan ID')
       }
 
-      const response = await fetch(`${API_BASE_URL}/api/clinician/rehabilitation-plans/${plan.id}/progress`, {
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-      })
+      const result = await apiClient.get<any>(
+        `${API_ROUTES.CLINICIAN.REHABILITATION_PLAN(plan.id)}/progress`
+      )
       
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to fetch progress data')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch progress data')
       }
       
-      const data = await response.json()
-      setProgressData(data)
+      setProgressData(result.data)
     } catch (err: any) {
       console.error('Error fetching progress:', err)
       setError(err.message || 'Failed to load progress data')
@@ -686,6 +793,7 @@ export function ClinicianDashboard() {
       (c.status === 'ACTIVE' || c.status === 'IN REHAB') && !c.isInRehab
     )
   }, [sortedCases])
+
 
   return (
     <DashboardLayout>
@@ -784,6 +892,19 @@ export function ClinicianDashboard() {
             <div className="clinician-summary-content">
               <p className="clinician-summary-label">Completed Cases</p>
               <p className="clinician-summary-value">{summary.completed}</p>
+            </div>
+          </div>
+
+          <div className="clinician-summary-card">
+            <div className="clinician-summary-icon" style={{ backgroundColor: '#E0F2FE' }}>
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                <polyline points="22 4 12 14.01 9 11.01"></polyline>
+              </svg>
+            </div>
+            <div className="clinician-summary-content">
+              <p className="clinician-summary-label">In Rehabilitation</p>
+              <p className="clinician-summary-value">{summary.inRehab}</p>
             </div>
           </div>
 
@@ -1071,8 +1192,7 @@ export function ClinicianDashboard() {
                             <button 
                               className="clinician-action-btn"
                               onClick={() => {
-                                setSelectedCase(caseItem)
-                                setShowViewModal(true)
+                                navigate(PROTECTED_ROUTES.CLINICIAN.CASE_DETAIL.replace(':caseId', caseItem.id))
                               }}
                               title="View case details"
                             >
@@ -1216,7 +1336,7 @@ export function ClinicianDashboard() {
                         type="date" 
                         value={createPlanForm.start_date}
                         onChange={(e) => setCreatePlanForm({ ...createPlanForm, start_date: e.target.value })}
-                        min={new Date().toISOString().split('T')[0]} // Can't select past dates
+                        min={getTodayDateString()} // Can't select past dates
                         required
                       />
                       <small className="clinician-form-helper">When should this rehabilitation plan start? (Day 1 will begin on this date)</small>
@@ -1342,169 +1462,6 @@ export function ClinicianDashboard() {
                   </button>
                 </>
               )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* View Case Modal */}
-      {showViewModal && selectedCase && (
-        <div className="clinician-modal-overlay" onClick={() => setShowViewModal(false)}>
-          <div className="clinician-modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="clinician-modal-header">
-              <div>
-                <h2 className="clinician-modal-title">Case Details</h2>
-                <p className="clinician-modal-subtitle">{selectedCase.caseNumber}</p>
-              </div>
-              <button 
-                className="clinician-modal-close"
-                onClick={() => setShowViewModal(false)}
-                aria-label="Close modal"
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <line x1="18" y1="6" x2="6" y2="18"></line>
-                  <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-              </button>
-            </div>
-            <div className="clinician-modal-body">
-              <div className="clinician-details-grid">
-                <div className="clinician-detail-section">
-                  <h3 className="clinician-detail-section-title">Case Information</h3>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Case Number:</span>
-                    <span className="clinician-detail-value">{selectedCase.caseNumber}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Status:</span>
-                    <span className="clinician-status-badge" style={getStatusInlineStyle(selectedCase.status)}>
-                      {getStatusLabel(selectedCase.status)}
-                    </span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Severity:</span>
-                    {(() => {
-                      const priorityStyleObj = getPriorityStyle(selectedCase.priority)
-                      const priorityStyle = { backgroundColor: priorityStyleObj.bg, color: priorityStyleObj.color }
-                      return (
-                        <span className="clinician-priority-badge" style={priorityStyle}>
-                          {selectedCase.priority}
-                        </span>
-                      )
-                    })()}
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Incident Type:</span>
-                    <span className="clinician-detail-value">{TYPE_LABELS[selectedCase.type] || selectedCase.type}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Created:</span>
-                    <span className="clinician-detail-value">{formatDate(selectedCase.createdAt)}</span>
-                  </div>
-                </div>
-                <div className="clinician-detail-section">
-                  <h3 className="clinician-detail-section-title">Worker Information</h3>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Name:</span>
-                    <span className="clinician-detail-value">{selectedCase.workerName}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Email:</span>
-                    <span className="clinician-detail-value">{selectedCase.workerEmail}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Team:</span>
-                    <span className="clinician-detail-value">{selectedCase.teamName}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Team Leader:</span>
-                    <span className="clinician-detail-value">{selectedCase.teamLeaderName || 'N/A'}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Site Location:</span>
-                    <span className="clinician-detail-value">{selectedCase.siteLocation || 'N/A'}</span>
-                  </div>
-                </div>
-                <div className="clinician-detail-section">
-                  <h3 className="clinician-detail-section-title">Incident Details</h3>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Start Date:</span>
-                    <span className="clinician-detail-value">{formatDate(selectedCase.startDate)}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">End Date:</span>
-                    <span className="clinician-detail-value">{selectedCase.endDate ? formatDate(selectedCase.endDate) : 'Ongoing'}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Reason:</span>
-                    <span className="clinician-detail-value">{selectedCase.reason || 'No reason provided'}</span>
-                  </div>
-                </div>
-                <div className="clinician-detail-section">
-                  <h3 className="clinician-detail-section-title">Supervisor Information</h3>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Supervisor:</span>
-                    <span className="clinician-detail-value">{selectedCase.supervisorName || 'N/A'}</span>
-                  </div>
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Last Updated:</span>
-                    <span className="clinician-detail-value">{formatDate(selectedCase.updatedAt)}</span>
-                  </div>
-                  {(selectedCase.status === 'CLOSED' || selectedCase.status === 'RETURN TO WORK') && selectedCase.approvedBy && (
-                    <div className="clinician-detail-item">
-                      <span className="clinician-detail-label">Approved by:</span>
-                      <span className="clinician-detail-value" style={{ color: '#10B981', fontWeight: 600 }}>
-                        {selectedCase.approvedBy}
-                      </span>
-                    </div>
-                  )}
-                  {(selectedCase.status === 'CLOSED' || selectedCase.status === 'RETURN TO WORK') && selectedCase.approvedAt && (
-                    <div className="clinician-detail-item">
-                      <span className="clinician-detail-label">Approved at:</span>
-                      <span className="clinician-detail-value">{formatDate(selectedCase.approvedAt)}</span>
-                    </div>
-                  )}
-                  <div className="clinician-detail-item">
-                    <span className="clinician-detail-label">Assignment Status:</span>
-                    <span className="clinician-detail-value">
-                      <span 
-                        style={{
-                          display: 'inline-block',
-                          padding: '4px 10px',
-                          borderRadius: '12px',
-                          fontSize: '11px',
-                          fontWeight: 600,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.05em',
-                          background: '#ECFDF5',
-                          color: '#10B981',
-                        }}
-                      >
-                        ✓ Approved by WHS Review
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="clinician-modal-footer">
-              {!selectedCase.isInRehab && (selectedCase.status === 'ACTIVE' || selectedCase.status === 'IN REHAB') && (
-                <button 
-                  className="clinician-modal-submit-btn"
-                  onClick={() => {
-                    setShowViewModal(false)
-                    handleCreatePlan(selectedCase)
-                  }}
-                >
-                  Create Rehabilitation Plan
-                </button>
-              )}
-              <button 
-                className="clinician-modal-cancel-btn"
-                onClick={() => setShowViewModal(false)}
-              >
-                Close
-              </button>
             </div>
           </div>
         </div>
@@ -1701,7 +1658,7 @@ export function ClinicianDashboard() {
                     type="date" 
                     value={editPlanForm.start_date}
                     onChange={(e) => setEditPlanForm({ ...editPlanForm, start_date: e.target.value })}
-                    min={new Date().toISOString().split('T')[0]}
+                    min={getTodayDateString()}
                     required
                   />
                   <small className="clinician-form-helper">When should this rehabilitation plan start? (Day 1 will begin on this date)</small>
@@ -1752,6 +1709,86 @@ export function ClinicianDashboard() {
                 {updatingPlan ? 'Updating...' : 'Update Plan'}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal for Complete/Cancel */}
+      {showConfirmModal && planToUpdate && (
+        <div className="clinician-modal-overlay" onClick={handleCancelConfirmModal}>
+          <div className="clinician-modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '480px' }}>
+            <div className="clinician-modal-header">
+              <div>
+                <h2 className="clinician-modal-title">
+                  {planToUpdate.status === 'completed' ? 'Complete Rehabilitation Plan' : 'Cancel Rehabilitation Plan'}
+                </h2>
+                <p className="clinician-modal-subtitle">
+                  Are you sure you want to {planToUpdate.status === 'completed' ? 'complete' : 'cancel'} this rehabilitation plan?
+                </p>
+              </div>
+              <button 
+                className="clinician-modal-close"
+                onClick={handleCancelConfirmModal}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+            <div className="clinician-modal-body">
+              <div className="clinician-alert-info" style={{
+                backgroundColor: planToUpdate.status === 'completed' ? '#EFF6FF' : '#FEF3C7',
+                borderColor: planToUpdate.status === 'completed' ? '#BFDBFE' : '#FCD34D',
+                color: planToUpdate.status === 'completed' ? '#1E40AF' : '#92400E'
+              }}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  {planToUpdate.status === 'completed' ? (
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  ) : (
+                    <>
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="12" y1="8" x2="12" y2="12"></line>
+                      <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                    </>
+                  )}
+                </svg>
+                <span>
+                  {planToUpdate.status === 'completed' 
+                    ? 'This will mark the rehabilitation plan as completed. The plan will no longer be active.'
+                    : 'This will cancel the rehabilitation plan. This action cannot be undone.'}
+                </span>
+              </div>
+            </div>
+            <div className="clinician-modal-footer">
+              <button 
+                className="clinician-modal-cancel-btn"
+                onClick={handleCancelConfirmModal}
+              >
+                Cancel
+              </button>
+              <button 
+                className="clinician-modal-submit-btn"
+                onClick={handleConfirmPlanStatusUpdate}
+                style={{
+                  backgroundColor: planToUpdate.status === 'completed' ? '#10B981' : '#EF4444'
+                }}
+              >
+                {planToUpdate.status === 'completed' ? 'Complete Plan' : 'Cancel Plan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Toast Notification */}
+      {showSuccessToast && (
+        <div className="success-toast">
+          <div className="success-toast-content">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span>{successMessage}</span>
           </div>
         </div>
       )}

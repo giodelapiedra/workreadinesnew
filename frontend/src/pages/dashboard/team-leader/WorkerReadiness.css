@@ -306,7 +306,7 @@
 
 .readiness-table-header {
   display: grid;
-  grid-template-columns: 2fr 1fr 1.2fr 2fr 1.2fr;
+  grid-template-columns: 2fr 1fr 1.2fr 2fr 1.2fr 0.8fr;
   gap: 16px;
   padding: 12px 24px;
   background: #FAFBFC;
@@ -330,7 +330,7 @@
 
 .readiness-table-row {
   display: grid;
-  grid-template-columns: 2fr 1fr 1.2fr 2fr 1.2fr;
+  grid-template-columns: 2fr 1fr 1.2fr 2fr 1.2fr 0.8fr;
   gap: 16px;
   padding: 16px 24px;
   background: #FFFFFF;
@@ -402,10 +402,15 @@
 .col-status,
 .col-time,
 .col-metrics,
-.col-readiness {
+.col-readiness,
+.col-actions {
   display: flex;
   align-items: center;
   font-size: 14px;
+}
+
+.col-actions {
+  justify-content: flex-end;
 }
 
 .worker-info {
@@ -594,12 +599,21 @@
   font-weight: 500;
   transition: all 0.15s ease;
   white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .view-details-btn:hover {
   background: #FAFBFC;
   border-color: #CBD5E1;
   color: #334155;
+}
+
+.view-details-btn svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
 }
 
 .readiness-badge {
@@ -945,7 +959,7 @@
 @media (max-width: 1200px) {
   .readiness-table-header,
   .readiness-table-row {
-    grid-template-columns: 2fr 1fr 1fr 1.5fr 1fr;
+    grid-template-columns: 2fr 1fr 1fr 1.5fr 1fr 0.8fr;
     gap: 12px;
     padding-left: 16px;
     padding-right: 16px;
@@ -976,7 +990,8 @@
   .col-status,
   .col-time,
   .col-metrics,
-  .col-readiness {
+  .col-readiness,
+  .col-actions {
     padding: 10px 0;
     border-bottom: 1px solid #f5f5f5;
   }

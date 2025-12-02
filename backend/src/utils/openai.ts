@@ -9,6 +9,7 @@ interface AnalyzeIncidentParams {
   location: string
   severity: 'low' | 'medium' | 'high' | 'critical'
   date: string
+  photo?: File // Optional photo for image analysis
 }
 
 interface AnalysisResult {
@@ -35,7 +36,7 @@ interface TranscriptionAnalysisResult {
 
 /**
  * Analyze incident report using OpenAI API
- * Optimized for cost: Uses GPT-3.5-turbo with concise prompts
+ * Optimized for cost: Uses GPT-3.5-turbo for text, GPT-4o for images
  */
 export async function analyzeIncident(params: AnalyzeIncidentParams): Promise<AnalysisResult> {
   const apiKey = process.env.OPENAI_API_KEY
@@ -66,12 +67,81 @@ Severity: ${params.severity.toUpperCase()}
 Date: ${params.date}
 Location: ${params.location}
 Description: ${params.description}
+${params.photo ? '\n[Image attached - analyze the photo for visual evidence of the incident, injuries, hazards, or safety concerns]' : ''}
 
-Provide your clinical assessment, medical recommendations, and professional advice.`
+Provide your clinical assessment, medical recommendations, and professional advice.${params.photo ? ' Include observations from the image analysis.' : ''}`
 
   try {
+    // Prepare messages array
+    const messages: any[] = [
+      { role: 'system', content: systemPrompt }
+    ]
+
+    // If photo is provided, use vision model with image
+    if (params.photo) {
+      try {
+        // Convert File to base64 for OpenAI Vision API
+        const arrayBuffer = await params.photo.arrayBuffer()
+        const buffer = Buffer.from(arrayBuffer)
+        const base64Image = buffer.toString('base64')
+        const mimeType = params.photo.type || 'image/jpeg'
+
+        // Use GPT-4o for vision (more cost-effective than gpt-4-vision-preview)
+        messages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: userPrompt
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${mimeType};base64,${base64Image}`
+              }
+            }
+          ]
+        })
+
+        const completion = await openai.chat.completions.create({
+          model: 'gpt-4o', // Vision-capable model
+          messages,
+          temperature: 0.3,
+          max_tokens: 500,
+          response_format: { type: 'json_object' }
+        })
+
+        const content = completion.choices[0]?.message?.content
+        if (!content) {
+          throw new Error('No response from OpenAI')
+        }
+
+        const analysis = JSON.parse(content) as AnalysisResult
+
+        // Validate and sanitize response
+        return {
+          summary: analysis.summary || 'Analysis completed with image review',
+          riskLevel: ['low', 'medium', 'high', 'critical'].includes(analysis.riskLevel?.toLowerCase())
+            ? analysis.riskLevel.toLowerCase() as 'low' | 'medium' | 'high' | 'critical'
+            : params.severity,
+          recommendations: Array.isArray(analysis.recommendations) 
+            ? analysis.recommendations.slice(0, 4)
+            : ['Conduct clinical assessment with healthcare provider', 'Monitor for signs of injury or complications', 'Follow workplace safety protocols'],
+          severityAssessment: analysis.severityAssessment || 'Clinical assessment pending - please review severity classification',
+          followUpActions: Array.isArray(analysis.followUpActions)
+            ? analysis.followUpActions.slice(0, 3)
+            : ['Notify clinical supervisor', 'Document incident for medical review', 'Monitor worker condition'],
+          advice: analysis.advice || 'As a clinician, I recommend immediate medical evaluation if any injuries are present. Ensure proper documentation for clinical follow-up.'
+        }
+      } catch (imageError: any) {
+        console.error('[OpenAI Vision Analysis] Error:', imageError)
+        // Fall through to text-only analysis if image analysis fails
+      }
+    }
+
+    // Text-only analysis (fallback or when no photo)
     const completion = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo', // Cost-effective model
+      model: 'gpt-3.5-turbo', // Cost-effective model for text-only
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }

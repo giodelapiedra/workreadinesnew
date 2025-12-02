@@ -6,6 +6,7 @@ export const ROLES = {
   EXECUTIVE: 'executive',
   CLINICIAN: 'clinician',
   TEAM_LEADER: 'team_leader',
+  ADMIN: 'admin',
 } as const
 
 export type UserRole = typeof ROLES[keyof typeof ROLES]
@@ -22,6 +23,7 @@ export const ROLE_OPTIONS: RoleOption[] = [
   { value: ROLES.EXECUTIVE, label: 'Executive' },
   { value: ROLES.CLINICIAN, label: 'Clinician' },
   { value: ROLES.TEAM_LEADER, label: 'Team Leader' },
+  { value: ROLES.ADMIN, label: 'Admin' },
 ]
 
 // Note: Use getDashboardRoute() from '../config/routes' instead of ROLE_ROUTES

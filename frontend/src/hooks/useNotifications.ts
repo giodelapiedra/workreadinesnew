@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { API_BASE_URL } from '../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../lib/apiClient'
+import { API_ROUTES } from '../config/apiRoutes'
 
 export interface Notification {
   id: string
@@ -12,6 +13,7 @@ export interface Notification {
     worker_name?: string
     worker_email?: string
     worker_id?: string
+    worker_profile_image_url?: string | null
     team_name?: string
     team_id?: string
     site_location?: string
@@ -82,34 +84,31 @@ export function useNotifications(
 
       let endpoint = ''
       if (role === 'whs_control_center') {
-        endpoint = `${API_BASE_URL}/api/whs/notifications?limit=${limit}`
+        endpoint = `${API_ROUTES.WHS.BASE}/notifications?limit=${limit}`
       } else if (role === 'team_leader') {
-        endpoint = `${API_BASE_URL}/api/teams/notifications?limit=${limit}`
+        endpoint = `${API_ROUTES.TEAMS.BASE}/notifications?limit=${limit}`
       } else if (role === 'clinician') {
-        endpoint = `${API_BASE_URL}/api/clinician/notifications?limit=${limit}`
+        endpoint = `${API_ROUTES.CLINICIAN.BASE}/notifications?limit=${limit}`
       } else if (role === 'worker') {
-        endpoint = `${API_BASE_URL}/api/checkins/notifications?limit=${limit}`
+        endpoint = `${API_ROUTES.CHECKINS.BASE}/notifications?limit=${limit}`
       } else if (role === 'supervisor') {
-        endpoint = `${API_BASE_URL}/api/supervisor/notifications?limit=${limit}`
+        endpoint = `${API_ROUTES.SUPERVISOR.BASE}/notifications?limit=${limit}`
       } else {
         // Unknown role, skip fetch
         isFetchingRef.current = false
         return
       }
 
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.get<{
+        notifications: Notification[]
+        unreadCount: number
+      }>(endpoint)
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch notifications')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch notifications')
       }
 
-      const data = await response.json()
+      const data = result.data
       setNotifications(data.notifications || [])
       setUnreadCount(data.unreadCount || 0)
     } catch (err: any) {
@@ -172,36 +171,30 @@ export function useNotifications(
     setUnreadCount(prev => Math.max(0, prev - 1))
 
     try {
-      let baseUrl = ''
+      let endpoint = ''
       if (role === 'whs_control_center') {
-        baseUrl = `${API_BASE_URL}/api/whs/notifications`
+        endpoint = `${API_ROUTES.WHS.BASE}/notifications/${notificationId}/read`
       } else if (role === 'team_leader') {
-        baseUrl = `${API_BASE_URL}/api/teams/notifications`
+        endpoint = `${API_ROUTES.TEAMS.BASE}/notifications/${notificationId}/read`
       } else if (role === 'clinician') {
-        baseUrl = `${API_BASE_URL}/api/clinician/notifications`
+        endpoint = `${API_ROUTES.CLINICIAN.BASE}/notifications/${notificationId}/read`
       } else if (role === 'worker') {
-        baseUrl = `${API_BASE_URL}/api/checkins/notifications`
+        endpoint = `${API_ROUTES.CHECKINS.BASE}/notifications/${notificationId}/read`
       } else if (role === 'supervisor') {
-        baseUrl = `${API_BASE_URL}/api/supervisor/notifications`
+        endpoint = `${API_ROUTES.SUPERVISOR.BASE}/notifications/${notificationId}/read`
       } else {
         return
       }
       
-      const response = await fetch(`${baseUrl}/${notificationId}/read`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.patch<{ message: string }>(endpoint)
 
-      if (!response.ok) {
+      if (isApiError(result)) {
         // Revert optimistic update if request failed
         setNotifications(prev => prev.map(n => 
           n.id === notificationId ? notification : n
         ))
         setUnreadCount(prev => prev + 1)
-        throw new Error('Failed to mark notification as read')
+        throw new Error(getApiErrorMessage(result) || 'Failed to mark notification as read')
       }
     } catch (err) {
       console.error('Error marking notification as read:', err)
@@ -228,34 +221,28 @@ export function useNotifications(
     setUnreadCount(0)
 
     try {
-      let baseUrl = ''
+      let endpoint = ''
       if (role === 'whs_control_center') {
-        baseUrl = `${API_BASE_URL}/api/whs/notifications`
+        endpoint = `${API_ROUTES.WHS.BASE}/notifications/read-all`
       } else if (role === 'team_leader') {
-        baseUrl = `${API_BASE_URL}/api/teams/notifications`
+        endpoint = `${API_ROUTES.TEAMS.BASE}/notifications/read-all`
       } else if (role === 'clinician') {
-        baseUrl = `${API_BASE_URL}/api/clinician/notifications`
+        endpoint = `${API_ROUTES.CLINICIAN.BASE}/notifications/read-all`
       } else if (role === 'worker') {
-        baseUrl = `${API_BASE_URL}/api/checkins/notifications`
+        endpoint = `${API_ROUTES.CHECKINS.BASE}/notifications/read-all`
       } else if (role === 'supervisor') {
-        baseUrl = `${API_BASE_URL}/api/supervisor/notifications`
+        endpoint = `${API_ROUTES.SUPERVISOR.BASE}/notifications/read-all`
       } else {
         return
       }
       
-      const response = await fetch(`${baseUrl}/read-all`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.patch<{ message: string }>(endpoint)
 
-      if (!response.ok) {
+      if (isApiError(result)) {
         // Revert optimistic update if request failed
         setNotifications(previousNotifications)
         setUnreadCount(previousUnreadCount)
-        throw new Error('Failed to mark all notifications as read')
+        throw new Error(getApiErrorMessage(result) || 'Failed to mark all notifications as read')
       }
     } catch (err) {
       console.error('Error marking all as read:', err)

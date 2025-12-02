@@ -6,6 +6,8 @@ import { getAdminClient } from '../utils/adminClient.js'
 import { formatDateString, parseDateString } from '../utils/dateTime.js'
 import { getTodayDateString, dateToDateString } from '../utils/dateUtils.js'
 import { calculateAge } from '../utils/ageUtils.js'
+import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath } from '../utils/photoUrl.js'
+import { getFromR2 } from '../utils/r2Storage.js'
 
 const clinician = new Hono<{ Variables: AuthVariables }>()
 
@@ -423,10 +425,40 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
       }
     }
 
+    // OPTIMIZATION: Fetch all related incidents in one query
+    const casesArray = Array.isArray(cases) ? cases : []
+    const incidentCaseUserIds = casesArray.map((c: any) => c.user_id)
+    const incidentCaseStartDates = casesArray.map((c: any) => c.start_date)
+    
+    // Fetch all approved incidents for these users
+    const { data: relatedIncidents } = await adminClient
+      .from('incidents')
+      .select('id, user_id, incident_date, photo_url, ai_analysis_result, description, severity')
+      .in('user_id', incidentCaseUserIds.length > 0 ? incidentCaseUserIds : ['00000000-0000-0000-0000-000000000000'])
+      .eq('approval_status', 'approved')
+      .order('created_at', { ascending: false })
+    
+    // Create map for O(1) lookup: key = `${user_id}_${incident_date}`
+    // Also create a fallback map for approximate date matching
+    const incidentMap = new Map()
+    const incidentUserMap = new Map<string, any[]>() // Map user_id to array of incidents
+    
+    if (relatedIncidents) {
+      relatedIncidents.forEach((inc: any) => {
+        const key = `${inc.user_id}_${inc.incident_date}`
+        incidentMap.set(key, inc)
+        
+        // Also group by user_id for fallback matching
+        if (!incidentUserMap.has(inc.user_id)) {
+          incidentUserMap.set(inc.user_id, [])
+        }
+        incidentUserMap.get(inc.user_id)!.push(inc)
+      })
+    }
+
     // Format cases (OPTIMIZATION: Pre-calculate date once, use Map for O(1) lookups)
     const todayDate = new Date()
     todayDate.setHours(0, 0, 0, 0) // Normalize to start of day for accurate comparison
-    const casesArray = Array.isArray(cases) ? cases : []
     let formattedCases = casesArray.map((incident: any) => {
       // OPTIMIZATION: Use direct array access instead of Array.isArray check (faster)
       const user = incident.users?.[0] || incident.users
@@ -500,6 +532,70 @@ clinician.get('/cases', authMiddleware, requireRole(['clinician']), async (c) =>
         healthLink: null, // Not available in current schema
         payer: null, // Not available in current schema
         caseManager: !!teamLeader, // Team leader acts as case manager
+        // Include incident photo and AI analysis
+        // Convert R2 URLs to proxy URLs to avoid DNS resolution issues
+        incidentPhotoUrl: (() => {
+          // Try exact match first
+          const incidentKey = `${incident.user_id}_${incident.start_date}`
+          const exactMatch = incidentMap.get(incidentKey)
+          if (exactMatch && exactMatch.id) {
+            return getIncidentPhotoProxyUrl(exactMatch.photo_url, exactMatch.id, 'clinician')
+          }
+          
+          // Fallback: Find incident within 7 days
+          const userIncidents = incidentUserMap.get(incident.user_id) || []
+          const exceptionDate = new Date(incident.start_date)
+          exceptionDate.setHours(0, 0, 0, 0)
+          
+          for (const inc of userIncidents) {
+            const incDate = new Date(inc.incident_date)
+            incDate.setHours(0, 0, 0, 0)
+            const daysDiff = Math.abs((incDate.getTime() - exceptionDate.getTime()) / (1000 * 60 * 60 * 24))
+            if (daysDiff <= 7 && inc.id) {
+              return getIncidentPhotoProxyUrl(inc.photo_url, inc.id, 'clinician')
+            }
+          }
+          
+          return null
+        })(),
+        incidentAiAnalysis: (() => {
+          // Try exact match first
+          const incidentKey = `${incident.user_id}_${incident.start_date}`
+          const exactMatch = incidentMap.get(incidentKey)
+          if (exactMatch?.ai_analysis_result) {
+            try {
+              if (typeof exactMatch.ai_analysis_result === 'string') {
+                return JSON.parse(exactMatch.ai_analysis_result)
+              }
+              return exactMatch.ai_analysis_result
+            } catch {
+              return null
+            }
+          }
+          
+          // Fallback: Find incident within 7 days
+          const userIncidents = incidentUserMap.get(incident.user_id) || []
+          const exceptionDate = new Date(incident.start_date)
+          exceptionDate.setHours(0, 0, 0, 0)
+          
+          for (const inc of userIncidents) {
+            const incDate = new Date(inc.incident_date)
+            incDate.setHours(0, 0, 0, 0)
+            const daysDiff = Math.abs((incDate.getTime() - exceptionDate.getTime()) / (1000 * 60 * 60 * 24))
+            if (daysDiff <= 7 && inc.ai_analysis_result) {
+              try {
+                if (typeof inc.ai_analysis_result === 'string') {
+                  return JSON.parse(inc.ai_analysis_result)
+                }
+                return inc.ai_analysis_result
+              } catch {
+                return null
+              }
+            }
+          }
+          
+          return null
+        })(),
       }
     })
 
@@ -653,7 +749,11 @@ clinician.get('/cases/:id', authMiddleware, requireRole(['clinician']), async (c
     const team = Array.isArray(caseData.teams) ? caseData.teams[0] : caseData.teams
     const userIds = [team?.supervisor_id, team?.team_leader_id].filter(Boolean)
     
-    const [teamMemberResult, usersResult, rehabPlanResult] = await Promise.all([
+    // Get related incident (for photo and AI analysis)
+    // Match by user_id and date (incident_date should match start_date)
+    const incidentDate = caseData.start_date
+    
+    const [teamMemberResult, usersResult, rehabPlanResult, incidentResult] = await Promise.all([
       // Get phone number
       adminClient
         .from('team_members')
@@ -677,7 +777,48 @@ clinician.get('/cases/:id', authMiddleware, requireRole(['clinician']), async (c
         .eq('exception_id', caseId)
         .eq('clinician_id', user.id)
         .eq('status', 'active')
-        .maybeSingle()
+        .maybeSingle(),
+      
+      // Get related incident (for photo and AI analysis)
+      // Use flexible matching to handle date format differences
+      (async () => {
+        // First try exact date match
+        const { data: exactMatch } = await adminClient
+          .from('incidents')
+          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .eq('user_id', caseData.user_id)
+          .eq('incident_date', incidentDate)
+          .eq('approval_status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        
+        if (exactMatch) {
+          return { data: exactMatch }
+        }
+        
+        // Fallback: Get most recent approved incident for this user within 7 days
+        const { data: recentIncident } = await adminClient
+          .from('incidents')
+          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .eq('user_id', caseData.user_id)
+          .eq('approval_status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        
+        if (recentIncident) {
+          const incidentDateObj = new Date(recentIncident.incident_date)
+          const exceptionDateObj = new Date(incidentDate)
+          const daysDiff = Math.abs((incidentDateObj.getTime() - exceptionDateObj.getTime()) / (1000 * 60 * 60 * 24))
+          
+          if (daysDiff <= 7) {
+            return { data: recentIncident }
+          }
+        }
+        
+        return { data: null }
+      })()
     ])
 
     // Build user map for O(1) lookups
@@ -711,6 +852,20 @@ clinician.get('/cases/:id', authMiddleware, requireRole(['clinician']), async (c
       priority = 'LOW'
     }
 
+    // Parse AI analysis if available
+    let aiAnalysis = null
+    if (incidentResult.data?.ai_analysis_result) {
+      try {
+        if (typeof incidentResult.data.ai_analysis_result === 'string') {
+          aiAnalysis = JSON.parse(incidentResult.data.ai_analysis_result)
+        } else {
+          aiAnalysis = incidentResult.data.ai_analysis_result
+        }
+      } catch (parseError) {
+        console.warn('[GET /clinician/cases/:id] Failed to parse AI analysis:', parseError)
+      }
+    }
+
     const formattedCase = {
       id: caseData.id,
       caseNumber: generateCaseNumber(caseData.id, caseData.created_at),
@@ -740,6 +895,22 @@ clinician.get('/cases/:id', authMiddleware, requireRole(['clinician']), async (c
       return_to_work_duty_type: caseData.return_to_work_duty_type || null,
       return_to_work_date: caseData.return_to_work_date || null,
       phone: teamMemberResult.data?.phone || null,
+      // Include incident photo and AI analysis (both formats for backward compatibility)
+      // Convert R2 URLs to proxy URLs to avoid DNS resolution issues
+      incidentPhotoUrl: incidentResult.data?.id 
+        ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'clinician') 
+        : null,
+      incidentId: incidentResult.data?.id || null,
+      incidentAiAnalysis: aiAnalysis,
+      incident: {
+        photoUrl: incidentResult.data?.id 
+          ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'clinician') 
+          : null,
+        incidentId: incidentResult.data?.id || null,
+        aiAnalysis: aiAnalysis,
+        description: incidentResult.data?.description || null,
+        severity: incidentResult.data?.severity || null,
+      },
     }
 
     return c.json({ case: formattedCase }, 200, {
@@ -3182,6 +3353,66 @@ clinician.put('/transcriptions/:id', authMiddleware, requireRole(['clinician']),
       error: 'Failed to update transcription', 
       details: error.message || 'Unknown error' 
     }, 500)
+  }
+})
+
+// Get incident photo (proxy endpoint to serve R2 images)
+// This avoids DNS resolution issues with R2 public URLs
+clinician.get('/incident-photo/:incidentId', authMiddleware, requireRole(['clinician']), async (c) => {
+  try {
+    const incidentId = c.req.param('incidentId')
+    
+    if (!incidentId) {
+      return c.json({ error: 'Incident ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get incident's photo URL
+    const { data: incident, error: incidentError } = await adminClient
+      .from('incidents')
+      .select('photo_url, user_id')
+      .eq('id', incidentId)
+      .single()
+
+    if (incidentError || !incident) {
+      return c.json({ error: 'Incident not found' }, 404)
+    }
+
+    if (!incident.photo_url) {
+      return c.json({ error: 'Incident photo not found' }, 404)
+    }
+
+    // Extract file path from R2 URL using centralized utility
+    const filePath = extractR2FilePath(incident.photo_url)
+
+    if (!filePath) {
+      // If we can't extract path, try to redirect
+      console.warn(`[GET /clinician/incident-photo/:incidentId] Could not extract file path from URL: ${incident.photo_url}`)
+      return c.redirect(incident.photo_url)
+    }
+
+    // Fetch image from R2
+    try {
+      const imageBuffer = await getFromR2(filePath)
+      
+      // Determine content type from file extension using centralized utility
+      const contentType = getContentTypeFromFilePath(filePath)
+
+      // Set appropriate headers
+      c.header('Content-Type', contentType)
+      c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year
+      c.header('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
+      
+      return c.body(imageBuffer as any)
+    } catch (r2Error: any) {
+      console.error(`[GET /clinician/incident-photo/:incidentId] Error fetching from R2:`, r2Error)
+      // Fallback: redirect to original URL
+      return c.redirect(incident.photo_url)
+    }
+  } catch (error: any) {
+    console.error('[GET /clinician/incident-photo/:incidentId] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
 

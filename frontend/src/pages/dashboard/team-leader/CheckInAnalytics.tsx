@@ -2,7 +2,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useAuth } from '../../../contexts/AuthContext'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import {
   LineChart,
   Line,
@@ -26,6 +27,8 @@ interface AnalyticsData {
     completionRate: number
     avgReadiness: { green: number; amber: number; red: number }
     onTimeRate: number
+    totalActiveWorkers: number
+    currentActiveExceptions: number
     trend: { completion: string; readiness: string }
   }
   dailyTrends: Array<{
@@ -58,21 +61,9 @@ interface AnalyticsData {
 
 const COLORS = {
   green: '#10b981',
-  greenLight: '#d1fae5',
-  greenDark: '#065f46',
   amber: '#f59e0b',
-  amberLight: '#fef3c7',
-  amberDark: '#92400e',
   red: '#ef4444',
-  redLight: '#fee2e2',
-  redDark: '#991b1b',
   pending: '#6b7280',
-  pendingLight: '#f3f4f6',
-  blue: '#3b82f6',
-  blueLight: '#dbeafe',
-  purple: '#8b5cf6',
-  gray: '#6b7280',
-  grayLight: '#f9fafb',
 }
 
 export function CheckInAnalytics() {
@@ -167,10 +158,11 @@ export function CheckInAnalytics() {
         if (controller) controller.abort()
       }, 30000) // 30s timeout
 
-      const response = await fetch(`${API_BASE_URL}/api/teams/check-ins/analytics?${params.toString()}&_t=${Date.now()}`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
+      const result = await apiClient.get<AnalyticsData>(
+        `${API_ROUTES.TEAMS.CHECKINS_ANALYTICS}?${params.toString()}&_t=${Date.now()}`,
+        {
+          headers: {
+            'Content-Type': 'application/json',
           'Cache-Control': 'no-cache',
         },
         signal: controller.signal,
@@ -179,12 +171,11 @@ export function CheckInAnalytics() {
       clearTimeout(timeoutId)
       controller = null // Clear reference after fetch completes
 
-      if (!response.ok) {
-        throw new Error('Failed to load analytics data')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to load analytics data')
       }
 
-      const data = await response.json()
-      setAnalyticsData(data)
+      setAnalyticsData(result.data)
     } catch (err: any) {
       if (err.name === 'AbortError') {
         console.log('Analytics request cancelled')
@@ -436,8 +427,8 @@ export function CheckInAnalytics() {
               </div>
               <div className="summary-card">
                 <div className="summary-label">
-                  Completion Rate
-                  <span className="tooltip-icon" title="Percentage of expected check-ins that were completed. Calculated as: (Actual Check-ins ÷ Expected Check-ins) × 100. Expected = 1 check-in per worker per day in the selected period.">
+                  Total Completed
+                  <span className="tooltip-icon" title="Total number of check-ins completed by workers in the selected period">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2" fill="none"/>
                       <path d="M6 5V6L6 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
@@ -445,24 +436,13 @@ export function CheckInAnalytics() {
                     </svg>
                   </span>
                 </div>
-                <div className={`summary-trend ${analyticsData.summary.trend.completion.startsWith('+') ? 'positive' : 'negative'}`}>
-                  <span className="trend-icon">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      {analyticsData.summary.trend.completion.startsWith('+') ? (
-                        <path d="M3 9L9 3M9 3H6M9 3V6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                      ) : (
-                        <path d="M3 3L9 9M9 9H6M9 9V6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                      )}
-                    </svg>
-                  </span>
-                  {analyticsData.summary.trend.completion} vs previous period
-                </div>
-                <div className="summary-description">Actual vs Expected</div>
+                <div className="summary-value">{analyticsData.summary.totalCheckIns.toLocaleString()}</div>
+                <div className="summary-description">Total completed by workers</div>
               </div>
               <div className="summary-card">
                 <div className="summary-label">
-                  Avg Readiness
-                  <span className="tooltip-icon" title="Average distribution of worker readiness status (Green = Fit to work, Amber = Minor issue, Red = Not fit to work)">
+                  Total Active Workers
+                  <span className="tooltip-icon" title="Total number of active workers with assigned schedules in the selected date range (excluding workers with exceptions)">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2" fill="none"/>
                       <path d="M6 5V6L6 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
@@ -470,28 +450,13 @@ export function CheckInAnalytics() {
                     </svg>
                   </span>
                 </div>
-                <div className="summary-readiness">
-                  <span className="readiness-badge green">{analyticsData.summary.avgReadiness.green}% Fit to work</span>
-                  <span className="readiness-badge amber">{analyticsData.summary.avgReadiness.amber}% Minor issue</span>
-                  <span className="readiness-badge red">{analyticsData.summary.avgReadiness.red}% Not fit to work</span>
-                </div>
-                <div className={`summary-trend ${analyticsData.summary.trend.readiness.startsWith('+') ? 'positive' : 'negative'}`}>
-                  <span className="trend-icon">
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      {analyticsData.summary.trend.readiness.startsWith('+') ? (
-                        <path d="M3 9L9 3M9 3H6M9 3V6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                      ) : (
-                        <path d="M3 3L9 9M9 9H6M9 9V6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                      )}
-                    </svg>
-                  </span>
-                  {analyticsData.summary.trend.readiness} Green % change
-                </div>
+                <div className="summary-value">{analyticsData.summary.totalActiveWorkers || 0}</div>
+                <div className="summary-description">Active workers</div>
               </div>
               <div className="summary-card">
                 <div className="summary-label">
-                  On-Time Rate
-                  <span className="tooltip-icon" title="Percentage of check-ins completed within the designated time window">
+                  Current Active Exceptions
+                  <span className="tooltip-icon" title="Number of workers with active exceptions today (exceptions that are currently active)">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
                       <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.2" fill="none"/>
                       <path d="M6 5V6L6 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
@@ -499,8 +464,8 @@ export function CheckInAnalytics() {
                     </svg>
                   </span>
                 </div>
-                <div className="summary-value">{analyticsData.summary.onTimeRate}%</div>
-                <div className="summary-description">Within time window</div>
+                <div className="summary-value">{analyticsData.summary.currentActiveExceptions || 0}</div>
+                <div className="summary-description">Active exceptions today</div>
               </div>
             </div>
 

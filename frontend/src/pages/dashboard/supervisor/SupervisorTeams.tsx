@@ -1,8 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { Avatar } from '../../../components/Avatar'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { calculateAge } from '../../../shared/date'
+import { validateBirthday } from '../../../utils/validationUtils'
 import './SupervisorTeams.css'
+import './SupervisorDashboard.css'
 
 interface TeamLeader {
   id: string
@@ -27,6 +32,13 @@ interface Team {
     pending: number
   }
   createdAt: string
+}
+
+// Helper for team leader avatar colors (not workers)
+const getAvatarColor = (name: string) => {
+  const colors = ['#9b8b7e', '#5b4fc7', '#10b981', '#f59e0b', '#3b82f6', '#ec4899', '#8b5cf6', '#14b8a6']
+  const index = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % colors.length
+  return colors[index]
 }
 
 export function SupervisorTeams() {
@@ -54,68 +66,120 @@ export function SupervisorTeams() {
     last_name: '',
     team_name: '',
     site_location: '',
+    gender: '' as 'male' | 'female' | '',
+    date_of_birth: '',
   })
+  const [birthMonth, setBirthMonth] = useState('')
+  const [birthDay, setBirthDay] = useState('')
+  const [birthYear, setBirthYear] = useState('')
+  const [birthdayError, setBirthdayError] = useState('')
 
-  useEffect(() => {
-    fetchTeams()
-  }, [])
-
-  const fetchTeams = async () => {
+  const fetchTeams = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/teams`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.get<{ teams: Team[] }>(
+        `${API_ROUTES.SUPERVISOR.TEAMS}?_t=${Date.now()}`
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch teams')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch teams')
       }
 
-      const data = await response.json()
-      setTeams(data.teams || [])
+      setTeams(result.data.teams || [])
     } catch (err: any) {
       console.error('Error fetching teams:', err)
       setError(err.message || 'Failed to load teams')
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  const handleCreateTeamLeader = async () => {
+  useEffect(() => {
+    fetchTeams()
+  }, [fetchTeams])
+
+  // Reset form helper function (optimized - no duplication)
+  const resetTeamLeaderForm = useCallback(() => {
+    setTeamLeaderForm({
+      email: '',
+      password: '',
+      first_name: '',
+      last_name: '',
+      team_name: '',
+      site_location: '',
+      gender: '',
+      date_of_birth: '',
+    })
+    setBirthMonth('')
+    setBirthDay('')
+    setBirthYear('')
+    setBirthdayError('')
+    setCreateError(null)
+  }, [])
+
+  // Validate birthday and show error if invalid
+  // Use centralized validation utility
+  const handleCreateTeamLeader = useCallback(async () => {
     try {
       setCreateLoading(true)
       setCreateError(null)
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/team-leaders`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(teamLeaderForm),
-      })
+      // Validate birthday from dropdowns
+      if (!birthMonth || !birthDay || !birthYear) {
+        setCreateError('Date of Birth is required')
+        setCreateLoading(false)
+        return
+      }
 
-      const data = await response.json()
+      // Construct date string from dropdowns
+      const dateStr = `${birthYear}-${String(birthMonth).padStart(2, '0')}-${String(birthDay).padStart(2, '0')}`
+      const birthDate = new Date(dateStr)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      
+      // Validate date
+      if (isNaN(birthDate.getTime())) {
+        setCreateError('Invalid date of birth')
+        setCreateLoading(false)
+        return
+      }
+      
+      if (birthDate >= today) {
+        setCreateError('Date of Birth must be in the past')
+        setCreateLoading(false)
+        return
+      }
+      
+      // Check minimum age (18 years old)
+      const age = calculateAge(dateStr)
+      if (age === null) {
+        setCreateError('Invalid date of birth')
+        setCreateLoading(false)
+        return
+      }
+      if (age < 18) {
+        setCreateError(`Age must be at least 18 years old. Current age: ${age} years old`)
+        setCreateLoading(false)
+        return
+      }
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to create team leader')
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.SUPERVISOR.TEAM_LEADERS,
+        {
+          ...teamLeaderForm,
+          gender: teamLeaderForm.gender || undefined,
+          date_of_birth: dateStr,
+        }
+      )
+
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to create team leader')
       }
 
       // Reset form and close modal
-      setTeamLeaderForm({
-        email: '',
-        password: '',
-        first_name: '',
-        last_name: '',
-        team_name: '',
-        site_location: '',
-      })
+      resetTeamLeaderForm()
       setShowCreateModal(false)
       
       // Refresh teams list
@@ -125,7 +189,7 @@ export function SupervisorTeams() {
     } finally {
       setCreateLoading(false)
     }
-  }
+  }, [birthMonth, birthDay, birthYear, teamLeaderForm, resetTeamLeaderForm, fetchTeams])
 
   const handleViewTeam = async (team: Team) => {
     setSelectedTeam(team)
@@ -134,17 +198,12 @@ export function SupervisorTeams() {
     
     try {
       // Fetch team members from the supervisor's team endpoint
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/teams/${team.id}/members`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+      const result = await apiClient.get<{ members: any[] }>(
+        `${API_ROUTES.SUPERVISOR.TEAMS}/${team.id}/members`
+      )
 
-      if (response.ok) {
-        const data = await response.json()
-        setTeamMembers(data.members || [])
+      if (!isApiError(result)) {
+        setTeamMembers(result.data.members || [])
       } else {
         setTeamMembers([])
       }
@@ -182,19 +241,16 @@ export function SupervisorTeams() {
       setDeleteLoading(true)
       setDeleteError(null)
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/teams/${teamToDelete.id}`, {
-        method: 'DELETE',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ password: deletePassword }),
-      })
+      // Use apiClient for consistent error handling and security
+      const result = await apiClient.delete<{ message: string }>(
+        `${API_ROUTES.SUPERVISOR.TEAMS}/${teamToDelete.id}`,
+        {
+          body: JSON.stringify({ password: deletePassword }),
+        }
+      )
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to delete team')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to delete team')
       }
 
       // Close modal and refresh teams list
@@ -218,27 +274,17 @@ export function SupervisorTeams() {
     setDeleteError(null)
   }
 
-  const filteredTeams = teams.filter(team => 
-    team.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    team.siteLocation?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    team.teamLeader?.fullName.toLowerCase().includes(searchQuery.toLowerCase())
+  // Memoize filtered teams to avoid unnecessary recalculations
+  const filteredTeams = useMemo(() => {
+    if (!searchQuery.trim()) return teams
+    const query = searchQuery.toLowerCase()
+    return teams.filter(team => 
+      team.name.toLowerCase().includes(query) ||
+      team.siteLocation?.toLowerCase().includes(query) ||
+      team.teamLeader?.fullName.toLowerCase().includes(query)
   )
+  }, [teams, searchQuery])
 
-  // Generate avatar colors based on team name
-  const getAvatarColor = (name: string) => {
-    const colors = [
-      '#9b8b7e', // brown
-      '#5b4fc7', // purple
-      '#10b981', // green
-      '#f59e0b', // amber
-      '#3b82f6', // blue
-      '#ec4899', // pink
-      '#8b5cf6', // violet
-      '#14b8a6', // teal
-    ]
-    const index = name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % colors.length
-    return colors[index]
-  }
 
   if (loading) {
     return (
@@ -437,117 +483,253 @@ export function SupervisorTeams() {
       {/* Create Team Leader Modal */}
       {showCreateModal && (
         <div 
-          className="modal-overlay"
+          className="team-members-modal-overlay"
           onClick={() => !createLoading && setShowCreateModal(false)}
         >
           <div 
-            className="modal-content"
+            className="team-members-modal-content"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="modal-header">
-              <h2>Create Team Leader</h2>
+            <div className="team-members-modal-header">
+              <div>
+                <h2 className="team-members-modal-title">Create Team Leader</h2>
+                <p className="team-members-modal-subtitle">Create a new team leader account</p>
+              </div>
               <button 
-                className="modal-close-btn"
-                onClick={() => setShowCreateModal(false)}
+                className="team-members-modal-close"
+                onClick={() => !createLoading && setShowCreateModal(false)}
+                aria-label="Close modal"
                 disabled={createLoading}
               >
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <line x1="18" y1="6" x2="6" y2="18"></line>
                   <line x1="6" y1="6" x2="18" y2="18"></line>
                 </svg>
               </button>
             </div>
 
+            <div className="team-members-modal-body">
             {createError && (
-              <div className="modal-error">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="10"></circle>
-                  <line x1="12" y1="8" x2="12" y2="12"></line>
-                  <line x1="12" y1="16" x2="12.01" y2="16"></line>
-                </svg>
+                <div style={{ 
+                  backgroundColor: '#FEF2F2', 
+                  border: '1px solid #FEE2E2', 
+                  borderRadius: '8px', 
+                  padding: '12px',
+                  marginBottom: '20px'
+                }}>
+                  <p style={{ fontSize: '13px', color: '#991B1B', margin: 0 }}>
                 {createError}
+                  </p>
               </div>
             )}
-
-            <div className="modal-body">
-              <div className="form-row">
-                <div className="form-group">
-                  <label>First Name *</label>
+              <form onSubmit={(e) => { e.preventDefault(); handleCreateTeamLeader(); }}>
+                <div className="team-members-form-group">
+                  <label className="team-members-form-label">Email *</label>
                   <input
-                    type="text"
-                    value={teamLeaderForm.first_name}
-                    onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, first_name: e.target.value })}
+                    type="email"
+                    className="team-members-form-input"
+                    value={teamLeaderForm.email}
+                    onChange={(e) => {
+                      setTeamLeaderForm(prev => ({ ...prev, email: e.target.value }))
+                      setCreateError(prev => prev ? null : prev)
+                    }}
+                    placeholder="Enter email address"
                     disabled={createLoading}
-                    placeholder="John"
+                    required
                   />
                 </div>
 
-                <div className="form-group">
-                  <label>Last Name *</label>
+                <div className="team-members-form-group">
+                  <label className="team-members-form-label">Password *</label>
                   <input
-                    type="text"
-                    value={teamLeaderForm.last_name}
-                    onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, last_name: e.target.value })}
+                    type="password"
+                    className="team-members-form-input"
+                    value={teamLeaderForm.password}
+                    onChange={(e) => {
+                      setTeamLeaderForm({ ...teamLeaderForm, password: e.target.value })
+                      setCreateError(null)
+                    }}
+                    placeholder="Enter password (min. 6 characters)"
                     disabled={createLoading}
-                    placeholder="Doe"
+                    minLength={6}
+                    required
                   />
-                </div>
               </div>
 
-              <div className="form-group">
-                <label>Email *</label>
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <div className="team-members-form-group" style={{ flex: 1 }}>
+                    <label className="team-members-form-label">First Name *</label>
                 <input
-                  type="email"
-                  value={teamLeaderForm.email}
-                  onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, email: e.target.value })}
+                      type="text"
+                      className="team-members-form-input"
+                      value={teamLeaderForm.first_name}
+                      onChange={(e) => {
+                        setTeamLeaderForm(prev => ({ ...prev, first_name: e.target.value }))
+                        setCreateError(prev => prev ? null : prev)
+                      }}
+                      placeholder="Enter first name"
                   disabled={createLoading}
-                  placeholder="john.doe@example.com"
+                      maxLength={100}
+                      required
                 />
               </div>
 
-              <div className="form-group">
-                <label>Password *</label>
+                  <div className="team-members-form-group" style={{ flex: 1 }}>
+                    <label className="team-members-form-label">Last Name *</label>
                 <input
-                  type="password"
-                  value={teamLeaderForm.password}
-                  onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, password: e.target.value })}
+                      type="text"
+                      className="team-members-form-input"
+                      value={teamLeaderForm.last_name}
+                      onChange={(e) => {
+                        setTeamLeaderForm(prev => ({ ...prev, last_name: e.target.value }))
+                        setCreateError(prev => prev ? null : prev)
+                      }}
+                      placeholder="Enter last name"
                   disabled={createLoading}
-                  placeholder="••••••••"
+                      maxLength={100}
+                      required
                 />
+                  </div>
               </div>
 
-              <div className="form-group">
-                <label>Team Name *</label>
+                <div className="team-members-form-group">
+                  <label className="team-members-form-label">Team Name *</label>
                 <input
                   type="text"
+                    className="team-members-form-input"
                   value={teamLeaderForm.team_name}
-                  onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, team_name: e.target.value })}
-                  disabled={createLoading}
+                    onChange={(e) => {
+                      setTeamLeaderForm(prev => ({ ...prev, team_name: e.target.value }))
+                      setCreateError(prev => prev ? null : prev)
+                    }}
                   placeholder="e.g., Team Alpha"
+                    disabled={createLoading}
+                    required
                 />
               </div>
 
-              <div className="form-group">
-                <label>Site Location (Optional)</label>
+                <div className="team-members-form-group">
+                  <label className="team-members-form-label">Site Location (Optional)</label>
                 <input
                   type="text"
+                    className="team-members-form-input"
                   value={teamLeaderForm.site_location}
-                  onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, site_location: e.target.value })}
-                  disabled={createLoading}
+                    onChange={(e) => {
+                      setTeamLeaderForm(prev => ({ ...prev, site_location: e.target.value }))
+                      setCreateError(prev => prev ? null : prev)
+                    }}
                   placeholder="e.g., Pilbara Site A"
+                    disabled={createLoading}
                 />
               </div>
+
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <div className="team-members-form-group" style={{ flex: 1 }}>
+                    <label className="team-members-form-label">Gender <span className="required">*</span></label>
+                  <select
+                      className="team-members-form-input"
+                    value={teamLeaderForm.gender}
+                        onChange={(e) => {
+                          setTeamLeaderForm(prev => ({ ...prev, gender: e.target.value as 'male' | 'female' | '' }))
+                          setCreateError(prev => prev ? null : prev)
+                        }}
+                    disabled={createLoading}
+                    required
+                  >
+                    <option value="">Select Gender</option>
+                    <option value="male">Male</option>
+                    <option value="female">Female</option>
+                  </select>
+                </div>
+
+                  <div className="team-members-form-group" style={{ flex: 1 }}>
+                    <label className="team-members-form-label">
+                      Birthday <span className="required">*</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginLeft: '4px', cursor: 'help' }}>
+                      <title>Select birthday</title>
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <line x1="12" y1="16" x2="12" y2="12"></line>
+                      <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                    </svg>
+                  </label>
+                  {birthdayError && (
+                    <div className="birthday-error-message" style={{ marginBottom: '12px' }}>
+                      {birthdayError}
+                    </div>
+                  )}
+                  <div className="birthday-selects">
+                    <select
+                      value={birthMonth}
+                      onChange={(e) => {
+                        setBirthMonth(e.target.value)
+                        const validation = validateBirthday(e.target.value, birthDay, birthYear)
+                        setBirthdayError(validation.error)
+                          setCreateError(prev => prev ? null : prev)
+                      }}
+                        className="team-members-form-input birthday-select"
+                      disabled={createLoading}
+                      required
+                    >
+                      <option value="">Month</option>
+                      {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((month, index) => (
+                        <option key={month} value={String(index + 1)}>{month}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={birthDay}
+                      onChange={(e) => {
+                        setBirthDay(e.target.value)
+                        const validation = validateBirthday(birthMonth, e.target.value, birthYear)
+                        setBirthdayError(validation.error)
+                          setCreateError(prev => prev ? null : prev)
+                      }}
+                        className="team-members-form-input birthday-select"
+                      disabled={createLoading}
+                      required
+                    >
+                      <option value="">Day</option>
+                      {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
+                        <option key={day} value={String(day)}>{day}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={birthYear}
+                      onChange={(e) => {
+                        setBirthYear(e.target.value)
+                        const validation = validateBirthday(birthMonth, birthDay, e.target.value)
+                        setBirthdayError(validation.error)
+                          setCreateError(prev => prev ? null : prev)
+                      }}
+                        className="team-members-form-input birthday-select"
+                      disabled={createLoading}
+                      required
+                    >
+                      <option value="">Year</option>
+                      {Array.from({ length: 100 }, (_, i) => new Date().getFullYear() - i).map(year => (
+                        <option key={year} value={String(year)}>{year}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+              </form>
             </div>
 
-            <div className="modal-footer">
+            <div className="team-members-modal-footer">
               <button
-                onClick={() => setShowCreateModal(false)}
+                className="team-members-modal-close-btn"
+                onClick={() => {
+                  if (!createLoading) {
+                    setShowCreateModal(false)
+                    resetTeamLeaderForm()
+                  }
+                }}
                 disabled={createLoading}
-                className="btn-secondary"
               >
                 Cancel
               </button>
               <button
+                className="team-members-modal-save-btn"
                 onClick={handleCreateTeamLeader}
                 disabled={
                   createLoading || 
@@ -555,9 +737,12 @@ export function SupervisorTeams() {
                   !teamLeaderForm.password || 
                   !teamLeaderForm.first_name || 
                   !teamLeaderForm.last_name || 
-                  !teamLeaderForm.team_name
+                  !teamLeaderForm.team_name ||
+                  !teamLeaderForm.gender ||
+                  !birthMonth || 
+                  !birthDay || 
+                  !birthYear
                 }
-                className="btn-primary"
               >
                 {createLoading ? 'Creating...' : 'Create Team Leader'}
               </button>
@@ -581,20 +766,37 @@ export function SupervisorTeams() {
                 <div 
                   className="team-leader-avatar-large"
                   style={{ backgroundColor: getAvatarColor(selectedTeam.teamLeader?.fullName || selectedTeam.name) }}
+                  aria-label={`Team ${selectedTeam.name} avatar`}
                 >
                   {selectedTeam.teamLeader?.initials || 'TL'}
                 </div>
-                <div>
-                  <h2>{selectedTeam.name}</h2>
+                <div className="modal-header-text">
+                  <h2 className="modal-team-name">{selectedTeam.name}</h2>
                   <p className="modal-subtitle">
-                    {selectedTeam.siteLocation && `${selectedTeam.siteLocation} • `}
-                    Led by {selectedTeam.teamLeader?.fullName || 'No Team Leader'}
+                    {selectedTeam.siteLocation && (
+                      <span className="modal-location">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ display: 'inline-block', verticalAlign: 'middle', marginRight: '4px' }}>
+                          <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                          <circle cx="12" cy="10" r="3"></circle>
+                        </svg>
+                        {selectedTeam.siteLocation}
+                      </span>
+                    )}
+                    {selectedTeam.siteLocation && selectedTeam.teamLeader && ' • '}
+                    {selectedTeam.teamLeader && (
+                      <span className="modal-leader">
+                        Led by <strong>{selectedTeam.teamLeader.fullName}</strong>
+                      </span>
+                    )}
+                    {!selectedTeam.teamLeader && <span className="modal-leader">No Team Leader</span>}
                   </p>
                 </div>
               </div>
               <button 
                 className="modal-close-btn"
                 onClick={closeTeamDetailsModal}
+                aria-label="Close team details modal"
+                title="Close (Esc)"
               >
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -605,9 +807,9 @@ export function SupervisorTeams() {
 
             <div className="modal-body">
               {/* Team Stats */}
-              <div className="team-stats-grid">
-                <div className="stat-card">
-                  <div className="stat-icon" style={{ background: '#dbeafe', color: '#2563eb' }}>
+              <div className="team-stats-grid" role="group" aria-label="Team statistics">
+                <div className="stat-card stat-card-primary" role="article" aria-label={`Total members: ${selectedTeam.memberCount}`}>
+                  <div className="stat-icon" style={{ background: '#dbeafe', color: '#2563eb' }} aria-hidden="true">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                       <circle cx="9" cy="7" r="4"></circle>
@@ -616,41 +818,47 @@ export function SupervisorTeams() {
                     </svg>
                   </div>
                   <div className="stat-content">
-                    <div className="stat-value">{selectedTeam.memberCount}</div>
+                    <div className="stat-value" aria-label={`${selectedTeam.memberCount} total members`}>
+                      {selectedTeam.memberCount}
+                    </div>
                     <div className="stat-label">Total Members</div>
                   </div>
                 </div>
 
-                <div className="stat-card">
-                  <div className="stat-icon" style={{ background: '#d1fae5', color: '#059669' }}>
+                <div className="stat-card stat-card-success" role="article" aria-label={`Green status: ${selectedTeam.checkInStats.green}`}>
+                  <div className="stat-icon" style={{ background: '#d1fae5', color: '#059669' }} aria-hidden="true">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="20 6 9 17 4 12"></polyline>
                     </svg>
                   </div>
                   <div className="stat-content">
-                    <div className="stat-value">{selectedTeam.checkInStats.green}</div>
+                    <div className="stat-value" aria-label={`${selectedTeam.checkInStats.green} green status`}>
+                      {selectedTeam.checkInStats.green}
+                    </div>
                     <div className="stat-label">Green Status</div>
                   </div>
                 </div>
 
                 {(selectedTeam.exceptionCount || 0) > 0 && (
-                  <div className="stat-card">
-                    <div className="stat-icon" style={{ background: '#fef3c7', color: '#d97706' }}>
+                  <div className="stat-card stat-card-warning" role="article" aria-label={`Exceptions: ${selectedTeam.exceptionCount}`}>
+                    <div className="stat-icon" style={{ background: '#fef3c7', color: '#d97706' }} aria-hidden="true">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                         <path d="M12 8v4m0 4h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round"></path>
                       </svg>
                     </div>
                     <div className="stat-content">
-                      <div className="stat-value">{selectedTeam.exceptionCount || 0}</div>
+                      <div className="stat-value" aria-label={`${selectedTeam.exceptionCount} exceptions`}>
+                        {selectedTeam.exceptionCount || 0}
+                      </div>
                       <div className="stat-label">Exceptions</div>
                     </div>
                   </div>
                 )}
 
                 {selectedTeam.checkInStats.amber > 0 && (
-                  <div className="stat-card">
-                    <div className="stat-icon" style={{ background: '#fef3c7', color: '#d97706' }}>
+                  <div className="stat-card stat-card-warning" role="article" aria-label={`Amber status: ${selectedTeam.checkInStats.amber}`}>
+                    <div className="stat-icon" style={{ background: '#fef3c7', color: '#d97706' }} aria-hidden="true">
                       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
                         <line x1="12" y1="9" x2="12" y2="13"></line>
@@ -658,21 +866,25 @@ export function SupervisorTeams() {
                       </svg>
                     </div>
                     <div className="stat-content">
-                      <div className="stat-value">{selectedTeam.checkInStats.amber}</div>
+                      <div className="stat-value" aria-label={`${selectedTeam.checkInStats.amber} amber status`}>
+                        {selectedTeam.checkInStats.amber}
+                      </div>
                       <div className="stat-label">Amber Status</div>
                     </div>
                   </div>
                 )}
 
-                <div className="stat-card">
-                  <div className="stat-icon" style={{ background: '#f3f4f6', color: '#6b7280' }}>
+                <div className="stat-card stat-card-neutral" role="article" aria-label={`Pending: ${selectedTeam.checkInStats.pending}`}>
+                  <div className="stat-icon" style={{ background: '#f3f4f6', color: '#6b7280' }} aria-hidden="true">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="12" cy="12" r="10"></circle>
                       <polyline points="12 6 12 12 16 14"></polyline>
                     </svg>
                   </div>
                   <div className="stat-content">
-                    <div className="stat-value">{selectedTeam.checkInStats.pending}</div>
+                    <div className="stat-value" aria-label={`${selectedTeam.checkInStats.pending} pending`}>
+                      {selectedTeam.checkInStats.pending}
+                    </div>
                     <div className="stat-label">Pending</div>
                   </div>
                 </div>
@@ -680,13 +892,20 @@ export function SupervisorTeams() {
 
               {/* Team Members List */}
               <div className="team-members-section">
-                <h3 className="section-title">Team Members</h3>
+                <div className="section-header">
+                  <h3 className="section-title">Team Members</h3>
+                  {teamMembers.length > 0 && (
+                    <span className="section-count" aria-label={`${teamMembers.length} team members`}>
+                      {teamMembers.length} {teamMembers.length === 1 ? 'member' : 'members'}
+                    </span>
+                  )}
+                </div>
                 
                 {loadingMembers ? (
                   <Loading message="Loading members..." size="small" />
                 ) : teamMembers.length === 0 ? (
-                  <div className="members-empty">
-                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <div className="members-empty" role="status" aria-live="polite">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
                       <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                       <circle cx="9" cy="7" r="4"></circle>
                       <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
@@ -695,47 +914,39 @@ export function SupervisorTeams() {
                     <p>No members in this team yet</p>
                   </div>
                 ) : (
-                  <div className="members-list">
-                    {teamMembers.map((member: any) => {
+                  <div className="members-list" role="list" aria-label="Team members list">
+                    {teamMembers.map((member: any, index: number) => {
                       const memberName = member.users?.full_name || 
                                         (member.users?.first_name && member.users?.last_name 
                                           ? `${member.users.first_name} ${member.users.last_name}`
                                           : member.users?.email?.split('@')[0] || 'Unknown')
-                      const initials = memberName
-                        .split(' ')
-                        .map((n: string) => n[0])
-                        .join('')
-                        .toUpperCase()
-                        .slice(0, 2)
-                      
                       return (
-                        <div key={member.id} className="member-item">
-                          <div 
-                            className="member-avatar"
-                            style={{ backgroundColor: getAvatarColor(memberName) }}
-                          >
-                            {initials}
-                          </div>
+                        <div 
+                          key={member.id} 
+                          className="member-item"
+                          role="listitem"
+                          tabIndex={0}
+                          aria-label={`Team member ${memberName}, ${member.users?.role || 'worker'}`}
+                        >
+                          <Avatar
+                            userId={member.user_id}
+                            profileImageUrl={member.users?.profile_image_url}
+                            firstName={member.users?.first_name}
+                            lastName={member.users?.last_name}
+                            email={member.users?.email}
+                            size="sm"
+                            showTooltip
+                          />
                           <div className="member-info">
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            <div className="member-name-row">
                               <div className="member-name">{memberName}</div>
                               {member.hasActiveException && member.exception && (
                                 <span 
-                                  style={{
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '4px',
-                                    padding: '4px 10px',
-                                    borderRadius: '6px',
-                                    fontSize: '11px',
-                                    fontWeight: '600',
-                                    backgroundColor: '#fef3c7',
-                                    color: '#92400e',
-                                    border: '1px solid #f59e0b',
-                                  }}
+                                  className="member-exception-badge"
                                   title={`Exception: ${member.exception.exception_type?.replace('_', ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()) || 'Exception'}${member.exception.reason ? ` - ${member.exception.reason}` : ''}`}
+                                  aria-label={`Exception: ${member.exception.exception_type?.replace('_', ' ').replace(/\b\w/g, (l: string) => l.toUpperCase()) || 'Exception'}`}
                                 >
-                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                                     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
                                     <path d="M12 8v4m0 4h.01" stroke="currentColor" strokeWidth="2" strokeLinecap="round"></path>
                                   </svg>
@@ -743,13 +954,17 @@ export function SupervisorTeams() {
                                 </span>
                               )}
                             </div>
-                            <div className="member-email">{member.users?.email || 'No email'}</div>
+                            <div className="member-email" aria-label={`Email: ${member.users?.email || 'No email'}`}>
+                              {member.users?.email || 'No email'}
+                            </div>
                             {member.phone && (
-                              <div className="member-phone">{member.phone}</div>
+                              <div className="member-phone" aria-label={`Phone: ${member.phone}`}>
+                                {member.phone}
+                              </div>
                             )}
                           </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
-                            <div className="member-role-badge">
+                          <div className="member-role-container">
+                            <div className="member-role-badge" aria-label={`Role: ${member.users?.role || 'worker'}`}>
                               {member.users?.role || 'worker'}
                             </div>
                           </div>

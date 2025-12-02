@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './TeamLeaderCalendar.css'
 
 interface Worker {
@@ -15,14 +16,37 @@ interface Worker {
 interface WorkerSchedule {
   id: string
   worker_id: string
-  scheduled_date?: string | null // NULL for recurring schedules
-  day_of_week?: number | null // 0-6 for recurring schedules, NULL for single-date
-  effective_date?: string | null // Start date for recurring schedules
-  expiry_date?: string | null // End date for recurring schedules
+  scheduled_date?: string | null
+  day_of_week?: number | null
+  effective_date?: string | null
+  expiry_date?: string | null
   start_time: string
   end_time: string
   notes?: string
   is_active: boolean
+  users?: Worker
+}
+
+interface WorkerException {
+  id: string
+  user_id: string
+  exception_type: string
+  reason?: string
+  start_date: string
+  end_date?: string | null
+  is_active: boolean
+}
+
+interface CheckIn {
+  user_id: string
+  check_in_date: string
+  check_in_time?: string
+  predicted_readiness?: string
+}
+
+interface TeamMember {
+  id: string
+  user_id: string
   users?: Worker
 }
 
@@ -32,98 +56,168 @@ const MONTHS = [
   'July', 'August', 'September', 'October', 'November', 'December'
 ]
 
-const MAX_SCHEDULES_TO_SHOW_IN_CELL = 2 // Show only 2 schedules in calendar cell, rest as count
-const DETAIL_PAGE_SIZE = 50 // Pagination size for detail panel
+interface ScheduleBlock {
+  type: 'shift' | 'out'
+  workerId: string
+  date: string
+  startTime?: string
+  endTime?: string
+  status?: 'on_time' | 'early' | 'late' | null
+  label: string
+}
 
 export function TeamLeaderCalendar() {
   const [schedules, setSchedules] = useState<WorkerSchedule[]>([])
+  const [members, setMembers] = useState<TeamMember[]>([])
+  const [exceptions, setExceptions] = useState<WorkerException[]>([])
+  const [checkIns, setCheckIns] = useState<CheckIn[]>([])
   const [loading, setLoading] = useState(true)
-  const [currentDate, setCurrentDate] = useState(new Date())
-  const [selectedDate, setSelectedDate] = useState<Date | null>(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [timeFilter, setTimeFilter] = useState<string>('all') // 'all', 'morning', 'afternoon', 'night'
-  const [detailPage, setDetailPage] = useState(1)
+  const [currentWeekStart, setCurrentWeekStart] = useState(() => {
+    // Start of current week (Monday)
+    const today = new Date()
+    const day = today.getDay()
+    const diff = today.getDate() - day + (day === 0 ? -6 : 1) // Adjust to Monday
+    const monday = new Date(today)
+    monday.setDate(diff)
+    monday.setHours(0, 0, 0, 0)
+    return monday
+  })
 
-  // Calculate date range for current month (with buffer for recurring schedules)
-  const monthRange = useMemo(() => {
-    const year = currentDate.getFullYear()
-    const month = currentDate.getMonth()
-    const firstDay = new Date(year, month, 1)
-    const lastDay = new Date(year, month + 1, 0)
-    // Add 2 weeks buffer before and after for recurring schedules
-    const startDate = new Date(firstDay)
-    startDate.setDate(startDate.getDate() - 14)
-    const endDate = new Date(lastDay)
-    endDate.setDate(endDate.getDate() + 14)
+  // Calculate week range (Monday to Sunday)
+  const weekRange = useMemo(() => {
+    const start = new Date(currentWeekStart)
+    start.setHours(0, 0, 0, 0)
+    const end = new Date(start)
+    end.setDate(end.getDate() + 6)
+    end.setHours(23, 59, 59, 999)
     
     return {
-      startDate: startDate.toISOString().split('T')[0],
-      endDate: endDate.toISOString().split('T')[0],
+      startDate: start.toISOString().split('T')[0],
+      endDate: end.toISOString().split('T')[0],
+      days: Array.from({ length: 7 }, (_, i) => {
+        const date = new Date(start)
+        date.setDate(date.getDate() + i)
+        return date
+      })
     }
-  }, [currentDate])
+  }, [currentWeekStart])
 
   useEffect(() => {
-    loadSchedules()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monthRange.startDate, monthRange.endDate])
+    loadData()
+  }, [weekRange.startDate, weekRange.endDate])
 
-  // Reset filters when date changes
-  useEffect(() => {
-    setSearchQuery('')
-    setTimeFilter('all')
-    setDetailPage(1)
-  }, [selectedDate])
-
-  const loadSchedules = async () => {
+  const loadData = async () => {
     try {
       setLoading(true)
-      // Fetch worker schedules with date range filter for better performance
-      const response = await fetch(
-        `${API_BASE_URL}/api/schedules/workers?startDate=${monthRange.startDate}&endDate=${monthRange.endDate}&_t=${Date.now()}`,
-        {
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'Cache-Control': 'no-cache',
-          },
-        }
-      )
-      if (!response.ok) throw new Error('Failed to fetch worker schedules')
-      const data = await response.json()
-      if (import.meta.env.DEV) {
-        console.log('[TeamLeaderCalendar] Loaded', data.schedules?.length || 0, 'worker schedules')
-      }
-      setSchedules(data.schedules || [])
+      await Promise.all([
+        loadMembers(),
+        loadSchedules(),
+        loadExceptions(),
+        loadCheckIns()
+      ])
     } catch (error) {
-      console.error('[TeamLeaderCalendar] Error loading worker schedules:', error)
-      setSchedules([])
+      console.error('[TeamLeaderCalendar] Error loading data:', error)
     } finally {
       setLoading(false)
     }
   }
 
-  // Get the first day of the month and number of days
-  const getMonthData = () => {
-    const year = currentDate.getFullYear()
-    const month = currentDate.getMonth()
-    const firstDay = new Date(year, month, 1)
-    const lastDay = new Date(year, month + 1, 0)
-    const daysInMonth = lastDay.getDate()
-    const startingDayOfWeek = firstDay.getDay()
+  const loadMembers = async () => {
+    try {
+      const result = await apiClient.get<{ team: any; members: TeamMember[] }>(API_ROUTES.TEAMS.BASE)
+      if (isApiError(result)) throw new Error(getApiErrorMessage(result) || 'Failed to fetch team members')
+      setMembers(result.data.members || [])
+    } catch (error) {
+      console.error('[TeamLeaderCalendar] Error loading members:', error)
+      setMembers([])
+    }
+  }
 
-    return { year, month, daysInMonth, startingDayOfWeek }
+  const loadSchedules = async () => {
+    try {
+      const result = await apiClient.get<{ schedules: WorkerSchedule[] }>(
+        `${API_ROUTES.SCHEDULES.WORKERS}?startDate=${weekRange.startDate}&endDate=${weekRange.endDate}&_t=${Date.now()}`,
+        { headers: { 'Cache-Control': 'no-cache' } }
+      )
+      if (isApiError(result)) throw new Error(getApiErrorMessage(result) || 'Failed to fetch schedules')
+      setSchedules(result.data.schedules || [])
+    } catch (error) {
+      console.error('[TeamLeaderCalendar] Error loading schedules:', error)
+      setSchedules([])
+    }
+  }
+
+  const loadExceptions = async () => {
+    try {
+      const result = await apiClient.get<{ exceptions: WorkerException[] }>(API_ROUTES.TEAMS.EXCEPTIONS)
+      if (isApiError(result)) throw new Error(getApiErrorMessage(result) || 'Failed to fetch exceptions')
+      setExceptions((result.data.exceptions || []).filter((exc: WorkerException) => exc.is_active))
+    } catch (error) {
+      console.error('[TeamLeaderCalendar] Error loading exceptions:', error)
+      setExceptions([])
+    }
+  }
+
+  const loadCheckIns = async () => {
+    try {
+      const params = new URLSearchParams({
+        startDate: weekRange.startDate,
+        endDate: weekRange.endDate,
+      })
+      
+      const result = await apiClient.get<{ checkIns: any }>(
+        `${API_ROUTES.TEAMS.CHECKINS}?${params.toString()}`
+      )
+      
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch check-ins')
+      }
+      
+      const data = result.data
+      // Flatten check-ins array
+      const allCheckIns: CheckIn[] = []
+      if (data.checkIns) {
+        Object.values(data.checkIns).forEach((dayCheckIns: any) => {
+          if (Array.isArray(dayCheckIns)) {
+            dayCheckIns.forEach((checkIn: any) => {
+              allCheckIns.push({
+                user_id: checkIn.user_id || checkIn.userId,
+                check_in_date: checkIn.check_in_date || checkIn.date,
+                check_in_time: checkIn.check_in_time,
+                predicted_readiness: checkIn.predicted_readiness
+              })
+            })
+          }
+        })
+      }
+      setCheckIns(allCheckIns)
+    } catch (error) {
+      console.error('[TeamLeaderCalendar] Error loading check-ins:', error)
+      setCheckIns([])
+    }
   }
 
   // Get worker name helper
-  const getWorkerName = (schedule: WorkerSchedule): string => {
-    const user = schedule.users
-    if (user?.full_name) return user.full_name
-    if (user?.first_name && user?.last_name) return `${user.first_name} ${user.last_name}`
-    if (user?.first_name) return user.first_name
-    return user?.email?.split('@')[0] || 'Unknown Worker'
-  }
+  const getWorkerName = useCallback((worker: Worker | undefined): string => {
+    if (!worker) return 'Unknown'
+    if (worker.full_name) return worker.full_name
+    if (worker.first_name && worker.last_name) return `${worker.first_name} ${worker.last_name}`
+    if (worker.first_name) return worker.first_name
+    return worker.email?.split('@')[0] || 'Unknown'
+  }, [])
 
-  // Memoized: Get schedules for a specific date (optimized for performance)
+  // Get worker initials for avatar
+  const getWorkerInitials = useCallback((worker: Worker | undefined): string => {
+    const name = getWorkerName(worker)
+    return name
+      .split(' ')
+      .map(n => n[0])
+      .join('')
+      .toUpperCase()
+      .slice(0, 2)
+  }, [getWorkerName])
+
+  // Get schedules for a specific date
   const getSchedulesForDate = useCallback((date: Date): WorkerSchedule[] => {
     const dayOfWeek = date.getDay()
     const dateStr = date.toISOString().split('T')[0]
@@ -133,23 +227,21 @@ export function TeamLeaderCalendar() {
     return schedules.filter(schedule => {
       if (!schedule.is_active) return false
 
-      // Single-date schedule: check if scheduled_date matches
+      // Single-date schedule
       if (schedule.scheduled_date && (schedule.day_of_week === null || schedule.day_of_week === undefined)) {
         return schedule.scheduled_date === dateStr
       }
 
-      // Recurring schedule: check day_of_week and effective/expiry dates
+      // Recurring schedule
       if (schedule.day_of_week !== null && schedule.day_of_week !== undefined) {
         if (schedule.day_of_week !== dayOfWeek) return false
 
-        // Check effective_date
         if (schedule.effective_date) {
           const effectiveDate = new Date(schedule.effective_date)
           effectiveDate.setHours(0, 0, 0, 0)
           if (dateObj < effectiveDate) return false
         }
 
-        // Check expiry_date
         if (schedule.expiry_date) {
           const expiryDate = new Date(schedule.expiry_date)
           expiryDate.setHours(23, 59, 59, 999)
@@ -163,340 +255,248 @@ export function TeamLeaderCalendar() {
     })
   }, [schedules])
 
-  // Memoized: Get shift type from time
-  const getShiftType = useCallback((startTime: string): 'morning' | 'afternoon' | 'night' | 'other' => {
-    const hour = parseInt(startTime.split(':')[0])
-    if (hour >= 5 && hour < 12) return 'morning'
-    if (hour >= 12 && hour < 17) return 'afternoon'
-    if (hour >= 17 || hour < 5) return 'night'
-    return 'other'
+  // Check if worker has exception for date
+  const hasException = useCallback((workerId: string, date: Date): WorkerException | null => {
+    const dateStr = date.toISOString().split('T')[0]
+    const checkDate = new Date(dateStr)
+    checkDate.setHours(0, 0, 0, 0)
+
+    return exceptions.find(exc => {
+      if (exc.user_id !== workerId || !exc.is_active) return false
+      const startDate = new Date(exc.start_date)
+      startDate.setHours(0, 0, 0, 0)
+      const endDate = exc.end_date ? new Date(exc.end_date) : null
+      if (endDate) endDate.setHours(23, 59, 59, 999)
+
+      return checkDate >= startDate && (!endDate || checkDate <= endDate)
+    }) || null
+  }, [exceptions])
+
+  // Get check-in status for worker on date
+  const getCheckInStatus = useCallback((workerId: string, date: Date, scheduleStartTime?: string): 'on_time' | 'early' | 'late' | null => {
+    const dateStr = date.toISOString().split('T')[0]
+    const checkIn = checkIns.find(ci => ci.user_id === workerId && ci.check_in_date === dateStr)
+    
+    if (!checkIn || !checkIn.check_in_time || !scheduleStartTime) return null
+
+    // Simple status based on predicted_readiness (can be enhanced with actual time comparison)
+    if (checkIn.predicted_readiness === 'Green') return 'on_time'
+    if (checkIn.predicted_readiness === 'Yellow') return 'late'
+    return null
+  }, [checkIns])
+
+  // Format exception type to readable label
+  const formatExceptionType = useCallback((exceptionType: string): string => {
+    if (!exceptionType) return 'Exception'
+    return exceptionType
+      .split('_')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ')
   }, [])
 
-  // Memoized: Filter and sort schedules for selected date
-  const filteredSelectedDateSchedules = useMemo(() => {
-    if (!selectedDate) return []
-    
-    let filtered = getSchedulesForDate(selectedDate)
-    
-    // Apply search filter
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase()
-      filtered = filtered.filter(schedule => {
-        const workerName = getWorkerName(schedule).toLowerCase()
-        return workerName.includes(query)
+  // Build schedule blocks for the week (no duplications)
+  const scheduleBlocks = useMemo(() => {
+    const blocks: ScheduleBlock[] = []
+
+    weekRange.days.forEach((date) => {
+      const dateStr = date.toISOString().split('T')[0]
+      
+      members.forEach(member => {
+        const workerId = member.user_id
+
+        // Check for exception first (Out/OOO) - takes priority over schedules
+        const exception = hasException(workerId, date)
+        if (exception) {
+          const exceptionTypeLabel = formatExceptionType(exception.exception_type || 'exception')
+          const isAllDay = !exception.reason || exception.reason.toLowerCase().includes('all day')
+          
+          // Show exception type as main label, with reason if available
+          let exceptionLabel: string
+          if (isAllDay) {
+            exceptionLabel = `${exceptionTypeLabel} - All day`
+          } else if (exception.reason && exception.reason.trim()) {
+            exceptionLabel = `${exceptionTypeLabel} - ${exception.reason}`
+          } else {
+            exceptionLabel = exceptionTypeLabel
+          }
+          
+          blocks.push({
+            type: 'out',
+            workerId,
+            date: dateStr,
+            label: exceptionLabel
+          })
+          return // Exception takes priority, don't show schedule
+        }
+
+        // Check for schedules
+        const daySchedules = getSchedulesForDate(date).filter(s => s.worker_id === workerId)
+        
+        if (daySchedules.length > 0) {
+          daySchedules.forEach(schedule => {
+            const status = getCheckInStatus(workerId, date, schedule.start_time)
+            blocks.push({
+              type: 'shift',
+              workerId,
+              date: dateStr,
+              startTime: schedule.start_time,
+              endTime: schedule.end_time,
+              status,
+              label: `${schedule.start_time.substring(0, 5)} - ${schedule.end_time.substring(0, 5)}`
+            })
+          })
+        }
       })
-    }
-    
-    // Apply time filter
-    if (timeFilter !== 'all') {
-      filtered = filtered.filter(schedule => {
-        const shiftType = getShiftType(schedule.start_time)
-        return shiftType === timeFilter
-      })
-    }
-    
-    // Sort by worker name, then by time
-    return filtered.sort((a, b) => {
-      const nameA = getWorkerName(a).toLowerCase()
-      const nameB = getWorkerName(b).toLowerCase()
-      if (nameA !== nameB) return nameA.localeCompare(nameB)
-      return a.start_time.localeCompare(b.start_time)
     })
-  }, [selectedDate, getSchedulesForDate, searchQuery, timeFilter, getShiftType])
 
-  // Paginated schedules for detail panel
-  const paginatedSchedules = useMemo(() => {
-    const start = (detailPage - 1) * DETAIL_PAGE_SIZE
-    const end = start + DETAIL_PAGE_SIZE
-    return filteredSelectedDateSchedules.slice(start, end)
-  }, [filteredSelectedDateSchedules, detailPage])
+    return blocks
+  }, [weekRange.days, members, hasException, getSchedulesForDate, getCheckInStatus, formatExceptionType])
 
-  const totalPages = Math.ceil(filteredSelectedDateSchedules.length / DETAIL_PAGE_SIZE)
+  // Get schedule blocks for a worker on a specific date
+  const getBlocksForWorkerDate = useCallback((workerId: string, date: string): ScheduleBlock[] => {
+    return scheduleBlocks.filter(block => block.workerId === workerId && block.date === date)
+  }, [scheduleBlocks])
 
-  // Helper: Get today's date (normalized to midnight)
-  const getToday = () => {
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-    return today
+  // Navigate weeks
+  const goToPreviousWeek = () => {
+    const newDate = new Date(currentWeekStart)
+    newDate.setDate(newDate.getDate() - 7)
+    setCurrentWeekStart(newDate)
   }
 
-  // Check if date is in the past
-  const isPastDate = (date: Date): boolean => {
-    const checkDate = new Date(date)
-    checkDate.setHours(0, 0, 0, 0)
-    return checkDate < getToday()
+  const goToNextWeek = () => {
+    const newDate = new Date(currentWeekStart)
+    newDate.setDate(newDate.getDate() + 7)
+    setCurrentWeekStart(newDate)
+  }
+
+  const goToToday = () => {
+    const today = new Date()
+    const day = today.getDay()
+    const diff = today.getDate() - day + (day === 0 ? -6 : 1)
+    const monday = new Date(today)
+    monday.setDate(diff)
+    monday.setHours(0, 0, 0, 0)
+    setCurrentWeekStart(monday)
   }
 
   // Check if date is today
   const isToday = (date: Date): boolean => {
-    const today = getToday()
-    const checkDate = new Date(date)
-    checkDate.setHours(0, 0, 0, 0)
-    return checkDate.getTime() === today.getTime()
+    const today = new Date()
+    return date.toDateString() === today.toDateString()
   }
 
-  // Navigate months
-  const goToPreviousMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1))
-    setSelectedDate(null)
-  }
-
-  const goToNextMonth = () => {
-    setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1))
-    setSelectedDate(null)
-  }
-
-  const goToToday = () => {
-    setCurrentDate(new Date())
-    setSelectedDate(new Date())
-  }
-
-  const { year, month, daysInMonth, startingDayOfWeek } = getMonthData()
-
-  const renderCalendarDays = () => {
-    const days: React.ReactElement[] = []
-
-    // Empty cells before month starts
-    for (let i = 0; i < startingDayOfWeek; i++) {
-      days.push(<div key={`empty-${i}`} className="calendar-day empty"></div>)
-    }
-
-    // Days of the month
-    for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month, day)
-      const daySchedules = getSchedulesForDate(date)
-      const hasSchedule = daySchedules.length > 0
-      const isPast = isPastDate(date)
-      const isTodayDate = isToday(date)
-      const isSelected = selectedDate?.getTime() === date.getTime()
-
-      days.push(
-        <div
-          key={day}
-          className={`calendar-day ${hasSchedule ? 'has-schedule' : ''} ${isPast ? 'past-date' : ''} ${isTodayDate ? 'today' : ''} ${isSelected ? 'selected' : ''}`}
-          onClick={() => setSelectedDate(date)}
-        >
-          <div className="day-number">{day}</div>
-          {hasSchedule && (
-            <div className="schedule-details-in-calendar">
-              {daySchedules.slice(0, MAX_SCHEDULES_TO_SHOW_IN_CELL).map((schedule) => {
-                const workerName = getWorkerName(schedule)
-                const shortName = workerName.length > 6 ? workerName.substring(0, 6) + '..' : workerName
-                return (
-                  <div key={schedule.id} className={`schedule-time-badge ${isPast ? 'past' : ''}`} title={`${workerName}: ${schedule.start_time.substring(0, 5)} - ${schedule.end_time.substring(0, 5)}`}>
-                    <span className="worker-name-short">{shortName}</span>
-                    <span className="schedule-time">{schedule.start_time.substring(0, 5)}</span>
-                  </div>
-                )
-              })}
-              {daySchedules.length > MAX_SCHEDULES_TO_SHOW_IN_CELL && (
-                <div className="schedule-count-badge" title={`${daySchedules.length} workers scheduled`}>
-                  +{daySchedules.length - MAX_SCHEDULES_TO_SHOW_IN_CELL}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )
-    }
-
-    return days
-  }
+  // Only show members who have schedules in this week
+  const filteredMembers = useMemo(() => {
+    return members.filter(member => {
+      return weekRange.days.some(date => {
+        const dateStr = date.toISOString().split('T')[0]
+        const blocks = getBlocksForWorkerDate(member.user_id, dateStr)
+        return blocks.length > 0
+      })
+    })
+  }, [members, weekRange.days, getBlocksForWorkerDate])
 
   return (
     <DashboardLayout>
-      <div className="calendar-container">
-        <div className="calendar-header">
-          <h1>Worker Schedules Calendar</h1>
-          <p className="calendar-subtitle">View all worker schedules assigned by you</p>
+      <div className="weekly-calendar-container">
+        <div className="weekly-calendar-header">
+          <h1>Weekly Schedule</h1>
+          <div className="calendar-controls">
+            <button onClick={goToPreviousWeek} className="nav-button">← Previous</button>
+            <div className="week-display">
+              <h2>
+                {MONTHS[weekRange.days[0].getMonth()]} {weekRange.days[0].getDate()} - {MONTHS[weekRange.days[6].getMonth()]} {weekRange.days[6].getDate()}, {weekRange.days[0].getFullYear()}
+              </h2>
+            </div>
+            <button onClick={goToNextWeek} className="nav-button">Next →</button>
+            <button onClick={goToToday} className="today-button">Today</button>
+          </div>
         </div>
 
         {loading ? (
-          <Loading message="Loading calendar..." size="medium" />
+          <Loading message="Loading schedule..." size="medium" />
         ) : (
-          <>
-            <div className="calendar-controls">
-              <button onClick={goToPreviousMonth} className="nav-button">
-                ← Previous
-              </button>
-              <div className="month-year">
-                <h2>{MONTHS[month]} {year}</h2>
-              </div>
-              <button onClick={goToNextMonth} className="nav-button">
-                Next →
-              </button>
-              <button onClick={goToToday} className="today-button">
-                Today
-              </button>
-            </div>
-
-            <div className="calendar-wrapper">
+          <div className="weekly-calendar-wrapper">
+            {/* Calendar Grid */}
+            <div className="calendar-grid-wrapper">
               <div className="calendar-grid">
-                {/* Day headers */}
-                {DAYS_OF_WEEK.map(day => (
-                  <div key={day} className="calendar-day-header">
-                    {day}
+                {/* Day Headers */}
+                <div className="grid-header-row">
+                  <div className="grid-header-cell member-header-cell">
+                    <span>Member</span>
                   </div>
-                ))}
+                  {weekRange.days.map((date, index) => {
+                    const dayName = DAYS_OF_WEEK[date.getDay()]
+                    const dayNum = date.getDate()
+                    const month = MONTHS[date.getMonth()].substring(0, 3).toUpperCase()
+                    const isTodayDate = isToday(date)
+                    return (
+                      <div key={index} className={`grid-header-cell day-header ${isTodayDate ? 'today' : ''}`}>
+                        <div className="day-name">{dayName}</div>
+                        <div className="day-date">{dayNum} {month}</div>
+                      </div>
+                    )
+                  })}
+                </div>
 
-                {/* Calendar days */}
-                {renderCalendarDays()}
-              </div>
-
-              {/* Selected date details */}
-              {selectedDate && (
-                <div className="calendar-details">
-                  <div className="details-header">
-                    <h3>
-                      {selectedDate.toLocaleDateString('en-US', { 
-                        weekday: 'long', 
-                        year: 'numeric', 
-                        month: 'long', 
-                        day: 'numeric' 
-                      })}
-                    </h3>
-                    <div className="header-badges">
-                      {isPastDate(selectedDate) && (
-                        <span className="past-badge">Past</span>
-                      )}
-                      {isToday(selectedDate) && (
-                        <span className="today-badge">Today</span>
-                      )}
-                      {filteredSelectedDateSchedules.length > 0 && (
-                        <span className="count-badge">{filteredSelectedDateSchedules.length} workers</span>
-                      )}
-                    </div>
+                {/* Member Rows */}
+                {filteredMembers.length === 0 ? (
+                  <div className="no-schedules-row">
+                    <div className="no-schedules-message">No schedules this week</div>
                   </div>
-                  
-                  {/* Filters */}
-                  {getSchedulesForDate(selectedDate).length > 0 && (
-                    <div className="details-filters">
-                      <input
-                        type="text"
-                        placeholder="Search workers..."
-                        value={searchQuery}
-                        onChange={(e) => {
-                          setSearchQuery(e.target.value)
-                          setDetailPage(1) // Reset to first page on search
-                        }}
-                        className="search-input"
-                      />
-                      <select
-                        value={timeFilter}
-                        onChange={(e) => {
-                          setTimeFilter(e.target.value)
-                          setDetailPage(1) // Reset to first page on filter
-                        }}
-                        className="time-filter-select"
-                      >
-                        <option value="all">All Shifts</option>
-                        <option value="morning">Morning (5AM-12PM)</option>
-                        <option value="afternoon">Afternoon (12PM-5PM)</option>
-                        <option value="night">Night (5PM-5AM)</option>
-                      </select>
-                    </div>
-                  )}
-
-                  <div className="details-content">
-                    {filteredSelectedDateSchedules.length === 0 ? (
-                      <p className="no-schedule-text">
-                        {getSchedulesForDate(selectedDate).length === 0
-                          ? 'No worker schedules assigned for this date'
-                          : 'No workers match your search/filter'}
-                      </p>
-                    ) : (
-                      <>
-                        <div className="schedule-list">
-                          {paginatedSchedules.map((schedule) => {
-                            const workerName = getWorkerName(schedule)
-                            const isRecurring = schedule.day_of_week !== null && schedule.day_of_week !== undefined
-                            const shiftType = getShiftType(schedule.start_time)
-                            return (
-                              <div key={schedule.id} className="schedule-detail-card">
-                                <div className="schedule-worker-name">
-                                  <strong>{workerName}</strong>
-                                  <span className={`shift-type-badge ${shiftType}`}>
-                                    {shiftType === 'morning' ? '🌅' : shiftType === 'afternoon' ? '☀️' : '🌙'}
-                                  </span>
-                                </div>
-                                <div className="schedule-time">
-                                  {schedule.start_time.substring(0, 5)} - {schedule.end_time.substring(0, 5)}
-                                </div>
-                                {isRecurring && (
-                                  <div className="schedule-type">
-                                    <small>Recurring: {DAYS_OF_WEEK[schedule.day_of_week!]}</small>
-                                  </div>
-                                )}
-                                {schedule.notes && (
-                                  <div className="schedule-note">
-                                    <strong>Notes:</strong> {schedule.notes}
-                                  </div>
-                                )}
-                                {(schedule.effective_date || schedule.expiry_date) && (
-                                  <div className="schedule-dates">
-                                    {schedule.effective_date && (
-                                      <small>From: {new Date(schedule.effective_date).toLocaleDateString()}</small>
-                                    )}
-                                    {schedule.expiry_date && (
-                                      <small>Until: {new Date(schedule.expiry_date).toLocaleDateString()}</small>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-                            )
-                          })}
+                ) : (
+                  filteredMembers.map(member => {
+                    const worker = member.users
+                    const workerName = getWorkerName(worker)
+                    const initials = getWorkerInitials(worker)
+                    
+                    return (
+                      <div key={member.user_id} className="grid-row">
+                        {/* Member Cell */}
+                        <div className="member-cell">
+                          <div className="member-avatar-small">{initials}</div>
+                          <span className="member-name-small">{workerName}</span>
                         </div>
-                        
-                        {/* Pagination */}
-                        {totalPages > 1 && (
-                          <div className="pagination-controls">
-                            <button
-                              onClick={() => setDetailPage(p => Math.max(1, p - 1))}
-                              disabled={detailPage === 1}
-                              className="pagination-btn"
-                            >
-                              ← Previous
-                            </button>
-                            <span className="pagination-info">
-                              Page {detailPage} of {totalPages} ({filteredSelectedDateSchedules.length} total)
-                            </span>
-                            <button
-                              onClick={() => setDetailPage(p => Math.min(totalPages, p + 1))}
-                              disabled={detailPage === totalPages}
-                              className="pagination-btn"
-                            >
-                              Next →
-                            </button>
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
 
-            {/* Legend */}
-            <div className="calendar-legend">
-              <div className="legend-item">
-                <div className="schedule-time-badge">
-                  <span className="worker-name-short">Worker</span>
-                  <span className="schedule-time">08:00</span>
-                </div>
-                <span>Upcoming Schedule</span>
-              </div>
-              <div className="legend-item">
-                <div className="schedule-time-badge past-schedule">
-                  <span className="worker-name-short">Worker</span>
-                  <span className="schedule-time">08:00</span>
-                </div>
-                <span>Past Schedule</span>
+                        {/* Day Cells */}
+                        {weekRange.days.map((date, dayIndex) => {
+                          const dateStr = date.toISOString().split('T')[0]
+                          const blocks = getBlocksForWorkerDate(member.user_id, dateStr)
+                          const isTodayDate = isToday(date)
+
+                          return (
+                            <div key={dayIndex} className={`grid-cell ${isTodayDate ? 'today' : ''}`}>
+                              {blocks.map((block, blockIndex) => (
+                                <div
+                                  key={blockIndex}
+                                  className={`schedule-block ${block.type} ${block.status ? `status-${block.status}` : ''}`}
+                                  title={block.label}
+                                >
+                                  <div className="block-content">
+                                    <div className="block-label">{block.label}</div>
+                                    {block.status && (
+                                      <div className={`status-indicator ${block.status}`}>
+                                        {block.status === 'on_time' && '●'}
+                                        {block.status === 'early' && '●'}
+                                        {block.status === 'late' && '●'}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )
+                  })
+                )}
               </div>
             </div>
-          </>
+          </div>
         )}
       </div>
     </DashboardLayout>
   )
 }
-

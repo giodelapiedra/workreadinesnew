@@ -596,6 +596,67 @@
   color: #9ca3af;
 }
 
+/* Birthday Picker Styles */
+.birthday-selects {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.birthday-select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  font-size: 14px;
+  background: #FFFFFF;
+  transition: all 0.2s ease;
+}
+
+.birthday-select:focus {
+  outline: none;
+  border-color: #3B82F6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.birthday-select:disabled {
+  background: #F8FAFC;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.birthday-error-message {
+  position: relative;
+  background-color: #FEE2E2;
+  color: #DC2626;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  margin-top: 8px;
+  margin-bottom: 12px;
+  border: 1px solid #FCA5A5;
+}
+
+.birthday-error-message::before {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 15px;
+  border-width: 0 8px 8px 8px;
+  border-style: solid;
+  border-color: transparent transparent #FCA5A5 transparent;
+}
+
+.birthday-error-message::after {
+  content: '';
+  position: absolute;
+  top: -7px;
+  left: 15px;
+  border-width: 0 8px 8px 8px;
+  border-style: solid;
+  border-color: transparent transparent #FEE2E2 transparent;
+}
+
 .modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -722,12 +783,56 @@
   overflow: hidden;
 }
 
+.modal-header-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .modal-header-content h2 {
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   word-break: break-word;
+}
+
+.modal-team-name {
+  font-size: 24px;
+  font-weight: 700;
+  color: #111827;
+  margin: 0;
+  line-height: 1.2;
+  letter-spacing: -0.3px;
+}
+
+.modal-subtitle {
+  font-size: 14px;
+  color: #6b7280;
+  margin: 4px 0 0 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  line-height: 1.5;
+}
+
+.modal-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #6b7280;
+}
+
+.modal-leader {
+  color: #6b7280;
+}
+
+.modal-leader strong {
+  color: #374151;
+  font-weight: 600;
 }
 
 .team-leader-avatar-large {
@@ -759,6 +864,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.5;
 }
 
 /* Team Stats Grid */
@@ -777,12 +883,46 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  transition: all 0.2s;
+  transition: all 0.2s ease;
+  cursor: default;
 }
 
 .stat-card:hover {
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  border-color: #d1d5db;
+}
+
+.stat-card-primary {
+  background: linear-gradient(135deg, #eff6ff 0%, #f9fafb 100%);
+}
+
+.stat-card-primary:hover {
+  background: linear-gradient(135deg, #dbeafe 0%, #eff6ff 100%);
+}
+
+.stat-card-success {
+  background: linear-gradient(135deg, #f0fdf4 0%, #f9fafb 100%);
+}
+
+.stat-card-success:hover {
+  background: linear-gradient(135deg, #d1fae5 0%, #f0fdf4 100%);
+}
+
+.stat-card-warning {
+  background: linear-gradient(135deg, #fffbeb 0%, #f9fafb 100%);
+}
+
+.stat-card-warning:hover {
+  background: linear-gradient(135deg, #fef3c7 0%, #fffbeb 100%);
+}
+
+.stat-card-neutral {
+  background: #f9fafb;
+}
+
+.stat-card-neutral:hover {
+  background: #f3f4f6;
 }
 
 .stat-icon {
@@ -827,11 +967,30 @@
   margin-bottom: 24px;
 }
 
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 12px;
+}
+
 .section-title {
-  font-size: 16px;
+  font-size: 18px;
   font-weight: 700;
   color: #111827;
-  margin: 0 0 12px 0;
+  margin: 0;
+  letter-spacing: -0.2px;
+}
+
+.section-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: #6b7280;
+  background: #f3f4f6;
+  padding: 4px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .members-loading {
@@ -889,16 +1048,31 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px;
+  padding: 14px;
   background: #f9fafb;
   border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  transition: all 0.2s;
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  cursor: default;
+  position: relative;
 }
 
 .member-item:hover {
   background: white;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  border-color: #d1d5db;
+  transform: translateX(2px);
+}
+
+.member-item:focus {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+  background: white;
+}
+
+.member-item:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
 }
 
 .member-avatar {
@@ -924,45 +1098,100 @@
 .member-info {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.member-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
 }
 
 .member-name {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
   color: #111827;
-  margin: 0 0 3px 0;
+  margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.4;
+}
+
+.member-exception-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background-color: #fef3c7;
+  color: #92400e;
+  border: 1px solid #f59e0b;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.member-exception-badge svg {
+  flex-shrink: 0;
 }
 
 .member-email {
-  font-size: 12px;
-  color: #6b7280;
-  margin: 0 0 2px 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.member-phone {
-  font-size: 12px;
+  font-size: 13px;
   color: #6b7280;
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.member-phone {
+  font-size: 13px;
+  color: #6b7280;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.member-role-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
 .member-role-badge {
-  padding: 4px 12px;
+  padding: 6px 14px;
   background: #dbeafe;
   color: #1e40af;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
   text-transform: capitalize;
   flex-shrink: 0;
+  white-space: nowrap;
+  border: 1px solid #bfdbfe;
+  transition: all 0.2s ease;
+}
+
+.member-item:hover .member-role-badge {
+  background: #bfdbfe;
+  border-color: #93c5fd;
 }
 
 /* Team Leader Contact */
@@ -1081,7 +1310,18 @@
   }
 
   .section-title {
-    font-size: 15px;
+    font-size: 16px;
+  }
+
+  .section-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .section-count {
+    font-size: 12px;
+    padding: 3px 8px;
   }
 
   .member-item {

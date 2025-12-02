@@ -210,17 +210,6 @@
   transition: all 0.2s ease;
   box-sizing: border-box;
   color: #1a202c;
-  -webkit-appearance: none; /* Remove iOS styling */
-  appearance: none;
-  /* Prevent zoom on iOS when focusing input */
-  font-size: 16px;
-}
-
-/* Desktop: smaller font size */
-@media (min-width: 481px) {
-  .auth-input {
-    font-size: 14px;
-  }
 }
 
 .auth-input:focus {
@@ -495,33 +484,64 @@
   .auth-form-container {
     max-width: 100%;
   }
+}
 
-  /* Mobile-specific improvements */
-  .auth-input {
-    font-size: 16px; /* Prevents zoom on iOS when focusing input */
-    padding: 16px; /* Larger touch target */
-    -webkit-appearance: none; /* Remove iOS styling */
-    border-radius: 8px;
-  }
+/* Birthday Picker Styles */
+.auth-label {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 500;
+  color: #64748B;
+  margin-bottom: 8px;
+}
 
-  .auth-button {
-    padding: 16px; /* Larger touch target */
-    font-size: 16px;
-    min-height: 48px; /* Minimum touch target size */
-    -webkit-tap-highlight-color: rgba(99, 102, 241, 0.2);
-  }
+.birthday-selects {
+  display: flex;
+  gap: 8px;
+}
 
-  .auth-password-toggle {
-    padding: 8px; /* Larger touch target */
-    min-width: 44px; /* Minimum touch target size */
-    min-height: 44px;
-  }
+.birthday-select {
+  flex: 1;
+  padding: 14px 16px;
+  font-size: 14px;
+  border: 1px solid #E2E8F0;
+  border-radius: 8px;
+  background: #FFFFFF;
+  transition: all 0.2s ease;
+  color: #0F172A;
+  cursor: pointer;
+}
 
-  .login-mode-btn {
-    padding: 12px 16px; /* Larger touch target */
-    min-height: 44px;
-    -webkit-tap-highlight-color: rgba(99, 102, 241, 0.1);
-  }
+.birthday-select:focus {
+  outline: none;
+  border-color: #3B82F6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.birthday-error-message {
+  position: relative;
+  background: #DC2626;
+  color: #FFFFFF;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  margin-bottom: 12px;
+  margin-top: 8px;
+  line-height: 1.4;
+}
+
+.birthday-error-message::after {
+  content: '';
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 0;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  border-left: 8px solid #DC2626;
 }
 
 /* Toast Notification Styles */

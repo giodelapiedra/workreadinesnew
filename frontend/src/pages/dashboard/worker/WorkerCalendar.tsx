@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { formatTime, formatDate } from '../../../shared/date'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './WorkerCalendar.css'
 
 interface WorkerSchedule {
@@ -28,11 +30,13 @@ const MONTHS = [
   'July', 'August', 'September', 'October', 'November', 'December'
 ]
 
+
 export function WorkerCalendar() {
   const [schedules, setSchedules] = useState<WorkerSchedule[]>([])
   const [loading, setLoading] = useState(true)
   const [currentDate, setCurrentDate] = useState(new Date())
   const [selectedDate, setSelectedDate] = useState<Date | null>(null)
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   useEffect(() => {
     loadSchedules()
@@ -47,23 +51,31 @@ export function WorkerCalendar() {
       const startDate = new Date(year, month, 1)
       const endDate = new Date(year, month + 1, 0)
       
-      const startDateStr = startDate.toISOString().split('T')[0]
-      const endDateStr = endDate.toISOString().split('T')[0]
+      const startDateStr = formatDate(startDate)
+      const endDateStr = formatDate(endDate)
 
-      const response = await fetch(`${API_BASE_URL}/api/schedules/my-schedule?startDate=${startDateStr}&endDate=${endDateStr}`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-        },
-      })
+      setErrorMessage(null)
+
+      const result = await apiClient.get<{ schedules: WorkerSchedule[] }>(
+        `${API_ROUTES.SCHEDULES.MY_SCHEDULE}?startDate=${startDateStr}&endDate=${endDateStr}`,
+        {
+          headers: { 'Cache-Control': 'no-cache' },
+          timeout: 15000,
+        }
+      )
       
-      if (!response.ok) throw new Error('Failed to fetch schedules')
-      const data = await response.json()
-      setSchedules(data.schedules || [])
-    } catch (error) {
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch schedules')
+      }
+      setSchedules(result.data.schedules || [])
+    } catch (error: any) {
       console.error('[WorkerCalendar] Error loading schedules:', error)
       setSchedules([])
+      if (error?.name === 'AbortError') {
+        setErrorMessage('Connection timed out. Please check your internet connection and try again.')
+      } else {
+        setErrorMessage('Unable to load schedules. Please refresh once your connection stabilizes.')
+      }
     } finally {
       setLoading(false)
     }
@@ -83,7 +95,7 @@ export function WorkerCalendar() {
 
   // Check if a date has a schedule
   const getSchedulesForDate = (date: Date): WorkerSchedule[] => {
-    const dateStr = date.toISOString().split('T')[0]
+    const dateStr = formatDate(date)
     return schedules.filter(schedule => schedule.display_date === dateStr && schedule.is_active)
   }
 
@@ -123,14 +135,6 @@ export function WorkerCalendar() {
   const goToToday = () => {
     setCurrentDate(new Date())
     setSelectedDate(new Date())
-  }
-
-  const formatTime = (timeStr: string): string => {
-    if (!timeStr) return ''
-    const [hours, minutes] = timeStr.split(':').map(Number)
-    const period = hours >= 12 ? 'PM' : 'AM'
-    const displayHours = hours % 12 || 12
-    return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
   }
 
   const { year, month, daysInMonth, startingDayOfWeek } = getMonthData()
@@ -197,7 +201,12 @@ export function WorkerCalendar() {
         </div>
 
         {loading ? (
-          <Loading message="Loading calendar..." size="medium" />
+          <Loading message="Loading calendar..." size="large" fullScreen />
+        ) : errorMessage ? (
+          <div className="worker-calendar-error">
+            <p>{errorMessage}</p>
+            <button onClick={loadSchedules} className="retry-button">Retry</button>
+          </div>
         ) : (
           <>
             <div className="calendar-controls">

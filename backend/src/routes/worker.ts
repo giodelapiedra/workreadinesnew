@@ -12,6 +12,12 @@ import {
   formatDateForDisplay 
 } from '../utils/scheduleUtils.js'
 import { calculateAge } from '../utils/ageUtils.js'
+import {
+  createPendingIncident,
+  notifyTeamLeaderPendingIncident,
+} from '../utils/incidentApproval.js'
+import { uploadToR2, generateIncidentPhotoPath, getFromR2 } from '../utils/r2Storage.js'
+import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath } from '../utils/photoUrl.js'
 
 const worker = new Hono()
 
@@ -57,6 +63,37 @@ worker.get('/can-report-incident', authMiddleware, requireRole(['worker']), asyn
       }
     }
 
+    // Check if worker has pending incident waiting for team leader approval
+    const { data: pendingIncident, error: pendingError } = await adminClient
+      .from('incidents')
+      .select('id, incident_type, incident_date, severity, approval_status, created_at')
+      .eq('user_id', user.id)
+      .eq('approval_status', 'pending_approval')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (pendingError) {
+      console.error('[GET /worker/can-report-incident] Error checking pending incidents:', pendingError)
+      // Don't fail - continue to allow reporting if check fails
+    }
+
+    if (pendingIncident) {
+      const incidentDate = pendingIncident.incident_date 
+        ? new Date(pendingIncident.incident_date).toLocaleDateString()
+        : new Date(pendingIncident.created_at).toLocaleDateString()
+      
+      return c.json({
+        canReport: false,
+        reason: `You have a pending incident report submitted on ${incidentDate} that is awaiting team leader approval. Please wait for approval or rejection before submitting a new report.`,
+        hasActiveCase: true,
+        exceptionType: pendingIncident.incident_type,
+        startDate: pendingIncident.incident_date || pendingIncident.created_at,
+        pendingIncident: true,
+        incidentId: pendingIncident.id,
+      })
+    }
+
     return c.json({
       canReport: true,
       reason: null,
@@ -80,8 +117,14 @@ worker.post('/analyze-incident', authMiddleware, requireRole(['worker']), async 
       return c.json({ error: 'Unauthorized' }, 401)
     }
 
-    const body = await c.req.json()
-    const { type, description, location, severity, date } = body
+    // Handle FormData (may include photo file)
+    const formData = await c.req.parseBody()
+    const type = formData.type as string
+    const description = formData.description as string
+    const location = formData.location as string
+    const severity = formData.severity as string
+    const date = formData.date as string
+    const photo = formData.photo as File | undefined
 
     // Validation
     if (!type || !description || !location || !severity || !date) {
@@ -98,25 +141,28 @@ worker.post('/analyze-incident', authMiddleware, requireRole(['worker']), async 
       return c.json({ error: 'Invalid severity' }, 400)
     }
 
-    // Perform AI analysis
+    // Perform AI analysis (with photo if provided)
     const analysis = await analyzeIncident({
-      type,
+      type: type as 'incident' | 'near_miss',
       description,
       location,
-      severity,
+      severity: severity as 'low' | 'medium' | 'high' | 'critical',
       date,
+      photo: photo, // Now supports image analysis with OpenAI Vision API
     })
 
     return c.json({
       success: true,
+      hasImageAnalysis: !!photo,
       analysis,
     })
 
   } catch (error: any) {
     console.error('[POST /worker/analyze-incident] Error:', error)
+    console.error('[POST /worker/analyze-incident] Error stack:', error.stack)
     return c.json({ 
       error: 'Failed to analyze incident report', 
-      details: error.message 
+      details: error.message || 'Unknown error occurred'
     }, 500)
   }
 })
@@ -136,6 +182,7 @@ worker.post('/report-incident', authMiddleware, requireRole(['worker']), async (
     const location = formData.get('location') as string
     const severity = formData.get('severity') as string || 'medium'
     const photo = formData.get('photo') as File | null
+    const aiAnalysisResultStr = formData.get('ai_analysis_result') as string | null
 
     // Validation
     if (!type || !description || !incidentDate || !location) {
@@ -259,193 +306,132 @@ worker.post('/report-incident', authMiddleware, requireRole(['worker']), async (
     let photoUrl: string | null = null
     if (photo && photo.size > 0) {
       try {
-        // Convert file to base64 for storage
-        const arrayBuffer = await photo.arrayBuffer()
-        const buffer = Buffer.from(arrayBuffer)
-        const base64 = buffer.toString('base64')
-        const dataUrl = `data:${photo.type};base64,${base64}`
-
-        // Store in Supabase Storage (if configured) or store as base64 in notes
-        // For now, we'll store it in the notes field as a reference
-        // In production, you'd want to upload to Supabase Storage
-        photoUrl = dataUrl // Store reference - in production, upload to storage and get URL
+        // SECURITY: Validate file type
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+        if (!allowedTypes.includes(photo.type)) {
+          console.warn('[POST /worker/report-incident] Invalid photo type:', photo.type)
+          // Continue without photo if invalid type
+        } else {
+          // SECURITY: Validate file size (max 5MB)
+          const maxSize = 5 * 1024 * 1024 // 5MB
+          if (photo.size > maxSize) {
+            console.warn(`[POST /worker/report-incident] Photo too large (${photo.size} bytes). Max size is 5MB.`)
+            // Continue without photo if too large
+          } else {
+            // Upload to Cloudflare R2 storage
+            // This prevents database size limit errors
+            const filePath = generateIncidentPhotoPath(user.id, photo.name)
+            photoUrl = await uploadToR2(photo, filePath, photo.type)
+            console.log(`[POST /worker/report-incident] Photo uploaded to R2: ${photoUrl}`)
+          }
+        }
       } catch (photoError: any) {
-        console.error('[POST /worker/report-incident] Error processing photo:', photoError)
-        // Don't fail the incident creation if photo processing fails
-      }
-    }
-
-    // Determine exception type based on report type
-    // For incident/near_miss reports, we'll use 'accident' or 'other' as exception type
-    const exceptionType = type === 'incident' ? 'accident' : 'other'
-
-    // Create incident record in incidents table
-    const incidentData: any = {
-      user_id: user.id,
-      team_id: teamId,
-      incident_type: type,
-      incident_date: incidentDate,
-      description: `${description}${location ? `\n\nLocation: ${location}` : ''}${photoUrl ? '\n\n[Photo attached]' : ''}`,
-      severity: severity,
-    }
-
-    // Insert into incidents table
-    let incidentId: string | null = null
-    try {
-      const { data: incident, error: incidentError } = await adminClient
-        .from('incidents')
-        .insert([incidentData])
-        .select('id')
-        .single()
-
-      if (!incidentError && incident) {
-        incidentId = incident.id
-      } else if (incidentError) {
-        console.error('[POST /worker/report-incident] Error creating incident:', incidentError)
-        // Continue with exception creation even if incident creation fails
-      }
-    } catch (err: any) {
-      console.error('[POST /worker/report-incident] Error inserting into incidents table:', err)
-      // Continue with exception creation
-    }
-
-    // Also create exception record
-    const exceptionData = {
-      user_id: user.id,
-      team_id: teamId,
-      exception_type: exceptionType,
-      reason: `${type === 'incident' ? 'Incident' : 'Near-Miss'} reported: ${description}. Location: ${location}. Severity: ${severity}`,
-      start_date: incidentDate,
-      end_date: null,
-      is_active: true,
-      created_by: user.id,
-      notes: photoUrl ? `Photo attached: ${photoUrl.substring(0, 100)}...` : null,
-    }
-
-    const { data: newException, error: createError } = await adminClient
-      .from('worker_exceptions')
-      .insert([exceptionData])
-      .select()
-      .single()
-
-    if (createError) {
-      console.error('[POST /worker/report-incident] Error creating exception:', createError)
-      return c.json({ error: 'Failed to create incident report', details: createError.message }, 500)
-    }
-
-    // OPTIMIZATION: Automatically deactivate all active schedules when incident is reported
-    let deactivatedScheduleCount = 0
-    try {
-      const { count: scheduleCount, error: countError } = await adminClient
-        .from('worker_schedules')
-        .select('*', { count: 'exact', head: true })
-        .eq('worker_id', user.id)
-        .eq('is_active', true)
-      
-      if (!countError && scheduleCount && scheduleCount > 0) {
-        const { error: deactivateError } = await adminClient
-          .from('worker_schedules')
-          .update({ is_active: false })
-          .eq('worker_id', user.id)
-          .eq('is_active', true)
-
-        if (!deactivateError) {
-          deactivatedScheduleCount = scheduleCount
+        console.error('[POST /worker/report-incident] Error uploading photo to R2:', photoError)
+        // Don't fail the incident creation if photo upload fails
+        // Photo will be null, incident can still be created
         }
       }
-    } catch (deactivateScheduleError: any) {
-      console.error('[POST /worker/report-incident] Error deactivating schedules:', deactivateScheduleError)
-    }
 
-    // Create notifications (team is required, so notifications will always be sent)
-    try {
+    // Get worker details for notifications
       const workerName = (user as any).full_name || 
                         ((user as any).first_name && (user as any).last_name 
                           ? `${(user as any).first_name} ${(user as any).last_name}`
                           : user.email || 'Unknown Worker')
 
-      const notifications: any[] = []
+    // Get AI analysis if available (from analyze-incident endpoint)
+    let aiAnalysis = null
+    if (aiAnalysisResultStr) {
+      try {
+        aiAnalysis = JSON.parse(aiAnalysisResultStr)
+      } catch (parseError) {
+        console.warn('[POST /worker/report-incident] Failed to parse AI analysis result:', parseError)
+        // Continue without AI analysis if parsing fails
+      }
+    }
 
-      // Notification for supervisor (team is required)
-      if (team.supervisor_id) {
-        notifications.push({
-          user_id: team.supervisor_id,
-          type: 'system',
-          title: `⚠️ ${type === 'incident' ? 'Incident' : 'Near-Miss'} Report`,
-          message: `${workerName} has reported a ${type === 'incident' ? 'workplace incident' : 'near-miss'} (Severity: ${severity.toUpperCase()}).`,
-          data: {
-            incident_id: incidentId || newException.id,
-            exception_id: newException.id,
-            worker_id: user.id,
-            worker_name: workerName,
-            worker_email: user.email || '',
-            incident_type: type,
-            severity: severity,
+    // Create incident with pending approval status (using approval workflow)
+    // This creates incident but NO exception yet - waits for team leader approval
+    let incident
+    try {
+      incident = await createPendingIncident({
+        userId: user.id,
+        teamId: teamId,
+        incidentType: type as 'incident' | 'near_miss',
+        incidentDate: incidentDate,
+        description: `${description}${location ? `\n\nLocation: ${location}` : ''}`,
+        severity: severity as 'low' | 'medium' | 'high' | 'critical',
             location: location,
-            incident_date: incidentDate,
-            description: description,
-            schedules_deactivated: deactivatedScheduleCount,
-          },
-          is_read: false,
-        })
+        photoUrl: photoUrl,
+        aiAnalysis: aiAnalysis,
+      })
+    } catch (createError: any) {
+      console.error('[POST /worker/report-incident] Error creating pending incident:', createError)
+      console.error('[POST /worker/report-incident] Error stack:', createError.stack)
+      console.error('[POST /worker/report-incident] Incident data:', {
+        userId: user.id,
+        teamId: teamId,
+        incidentType: type,
+        incidentDate: incidentDate,
+        severity: severity,
+        hasPhoto: !!photoUrl,
+        hasAiAnalysis: !!aiAnalysis,
+      })
+      return c.json({ 
+        error: 'Failed to create incident report', 
+        details: createError.message || 'Unknown error occurred'
+      }, 500)
       }
 
-      // Notification for team leader (team is required)
+    // Send notification to team leader (if team has team leader)
       if (team.team_leader_id) {
-        notifications.push({
-          user_id: team.team_leader_id,
-          type: 'system',
-          title: `⚠️ ${type === 'incident' ? 'Incident' : 'Near-Miss'} Report`,
-          message: `${workerName} has reported a ${type === 'incident' ? 'workplace incident' : 'near-miss'} (Severity: ${severity.toUpperCase()}).`,
-          data: {
-            incident_id: incidentId || newException.id,
-            exception_id: newException.id,
-            worker_id: user.id,
-            worker_name: workerName,
-            worker_email: user.email || '',
-            incident_type: type,
+      try {
+        await notifyTeamLeaderPendingIncident({
+          teamLeaderId: team.team_leader_id,
+          incidentId: incident.id,
+          workerId: user.id,
+          workerName: workerName,
+          workerEmail: user.email || '',
+          workerProfileImageUrl: (user as any).profile_image_url || null,
+          incidentType: type,
             severity: severity,
             location: location,
-            incident_date: incidentDate,
-            description: description,
-            schedules_deactivated: deactivatedScheduleCount,
-          },
-          is_read: false,
         })
+      } catch (notifError: any) {
+        console.error('[POST /worker/report-incident] Error sending notification to team leader:', notifError)
+        // Don't fail the incident creation if notification fails
+      }
       }
 
       // Notification for worker (confirmation)
-      notifications.push({
+    try {
+      await adminClient
+        .from('notifications')
+        .insert({
         user_id: user.id,
         type: 'system',
         title: '✅ Report Submitted',
-        message: `Your ${type === 'incident' ? 'incident' : 'near-miss'} report has been submitted successfully. Your supervisor has been notified.`,
+          message: `Your ${type === 'incident' ? 'incident' : 'near-miss'} report has been submitted successfully. Awaiting team leader approval.`,
         data: {
-          incident_id: incidentId || newException.id,
-          exception_id: newException.id,
+            incident_id: incident.id,
           incident_type: type,
+            approval_status: 'pending_approval',
         },
         is_read: false,
       })
-
-      if (notifications.length > 0) {
-        await adminClient
-          .from('notifications')
-          .insert(notifications)
-      }
     } catch (notifError: any) {
-      console.error('[POST /worker/report-incident] Error creating notifications:', notifError)
-      // Don't fail the incident creation if notifications fail
+      console.error('[POST /worker/report-incident] Error creating worker notification:', notifError)
+      // Don't fail the incident creation if notification fails
     }
 
     return c.json({
       success: true,
-      message: 'Incident report submitted successfully',
+      message: 'Incident report submitted successfully. Awaiting team leader approval.',
       incident: {
-        id: incidentId || newException.id,
+        id: incident.id,
         type: type,
         date: incidentDate,
         location: location,
+        approval_status: 'pending_approval',
       },
     }, 201)
 
@@ -608,6 +594,33 @@ worker.get('/cases', authMiddleware, requireRole(['worker']), async (c) => {
     const todayDate = new Date()
     todayDate.setHours(0, 0, 0, 0)
     const casesArray = Array.isArray(cases) ? cases : []
+    
+    // OPTIMIZATION: Fetch all related incidents in one query
+    // Fetch all approved incidents for this worker (since it's only one user)
+    const { data: relatedIncidents } = await adminClient
+      .from('incidents')
+      .select('id, user_id, incident_date, photo_url, ai_analysis_result, description, severity')
+      .eq('user_id', user.id)
+      .eq('approval_status', 'approved')
+      .order('created_at', { ascending: false })
+    
+    // Create map for O(1) lookup: key = `${user_id}_${incident_date}`
+    // Also create a user-based map for fallback matching
+    const incidentMap = new Map()
+    const userIncidentsMap = new Map<string, any[]>() // Map user_id to array of incidents
+    
+    if (relatedIncidents) {
+      relatedIncidents.forEach((inc: any) => {
+        const key = `${inc.user_id}_${inc.incident_date}`
+        incidentMap.set(key, inc)
+        
+        // Also group by user_id for fallback matching
+        if (!userIncidentsMap.has(inc.user_id)) {
+          userIncidentsMap.set(inc.user_id, [])
+        }
+        userIncidentsMap.get(inc.user_id)!.push(inc)
+      })
+    }
     let formattedCases = casesArray.map((incident: any) => {
       const team = incident.teams?.[0] || incident.teams
       const supervisor = team?.supervisor_id ? userMap.get(team.supervisor_id) : null
@@ -660,6 +673,70 @@ worker.get('/cases', authMiddleware, requireRole(['worker']), async (c) => {
         updatedAt: incident.updated_at,
         return_to_work_duty_type: incident.return_to_work_duty_type || null,
         return_to_work_date: incident.return_to_work_date || null,
+        // Include incident photo and AI analysis (with flexible date matching)
+        // Convert R2 URLs to proxy URLs to avoid DNS resolution issues
+        incidentPhotoUrl: (() => {
+          // Try exact match first
+          const incidentKey = `${incident.user_id}_${incident.start_date}`
+          const exactMatch = incidentMap.get(incidentKey)
+          if (exactMatch && exactMatch.id) {
+            return getIncidentPhotoProxyUrl(exactMatch.photo_url, exactMatch.id, 'worker')
+          }
+          
+          // Fallback: Find incident within 7 days
+          const userIncidents = userIncidentsMap.get(incident.user_id) || []
+          const exceptionDate = new Date(incident.start_date)
+          exceptionDate.setHours(0, 0, 0, 0)
+          
+          for (const inc of userIncidents) {
+            const incDate = new Date(inc.incident_date)
+            incDate.setHours(0, 0, 0, 0)
+            const daysDiff = Math.abs((incDate.getTime() - exceptionDate.getTime()) / (1000 * 60 * 60 * 24))
+            if (daysDiff <= 7 && inc.id) {
+              return getIncidentPhotoProxyUrl(inc.photo_url, inc.id, 'worker')
+            }
+          }
+          
+          return null
+        })(),
+        incidentAiAnalysis: (() => {
+          // Try exact match first
+          const incidentKey = `${incident.user_id}_${incident.start_date}`
+          const exactMatch = incidentMap.get(incidentKey)
+          if (exactMatch?.ai_analysis_result) {
+            try {
+              if (typeof exactMatch.ai_analysis_result === 'string') {
+                return JSON.parse(exactMatch.ai_analysis_result)
+              }
+              return exactMatch.ai_analysis_result
+            } catch {
+              return null
+            }
+          }
+          
+          // Fallback: Find incident within 7 days
+          const userIncidents = userIncidentsMap.get(incident.user_id) || []
+          const exceptionDate = new Date(incident.start_date)
+          exceptionDate.setHours(0, 0, 0, 0)
+          
+          for (const inc of userIncidents) {
+            const incDate = new Date(inc.incident_date)
+            incDate.setHours(0, 0, 0, 0)
+            const daysDiff = Math.abs((incDate.getTime() - exceptionDate.getTime()) / (1000 * 60 * 60 * 24))
+            if (daysDiff <= 7 && inc.ai_analysis_result) {
+              try {
+                if (typeof inc.ai_analysis_result === 'string') {
+                  return JSON.parse(inc.ai_analysis_result)
+                }
+                return inc.ai_analysis_result
+              } catch {
+                return null
+              }
+            }
+          }
+          
+          return null
+        })(),
       }
     })
 
@@ -741,13 +818,67 @@ worker.get('/cases/:id', authMiddleware, requireRole(['worker']), async (c) => {
       users?.forEach((u: any) => userMap.set(u.id, u))
     }
 
+    // Get related incident (for photo and AI analysis)
+    // Match by user_id and date (incident_date should match start_date)
+    // Use flexible matching: get the most recent approved incident for this user
+    // that matches the exception's start_date (they should be the same when incident is approved)
+    const incidentDate = caseData.start_date
+    
+    const [rehabPlanResult, incidentResult] = await Promise.all([
     // Check rehab status
-    const { data: rehabPlan } = await adminClient
+      adminClient
       .from('rehabilitation_plans')
       .select('id, status')
       .eq('exception_id', caseId)
       .eq('status', 'active')
+        .maybeSingle(),
+      
+      // Get related incident (for photo and AI analysis)
+      // Try exact date match first, then fallback to most recent approved incident for this user
+      (async () => {
+        // First try exact date match
+        const { data: exactMatch } = await adminClient
+          .from('incidents')
+          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .eq('user_id', caseData.user_id)
+          .eq('incident_date', incidentDate)
+          .eq('approval_status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1)
       .maybeSingle()
+        
+        if (exactMatch) {
+          return { data: exactMatch }
+        }
+        
+        // Fallback: Get most recent approved incident for this user
+        // This handles cases where dates might not match exactly due to timezone issues
+        const { data: recentIncident } = await adminClient
+          .from('incidents')
+          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .eq('user_id', caseData.user_id)
+          .eq('approval_status', 'approved')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+        
+        // Only return if the incident_date is within 7 days of the exception start_date
+        // This ensures we're matching the right incident
+        if (recentIncident) {
+          const incidentDateObj = new Date(recentIncident.incident_date)
+          const exceptionDateObj = new Date(incidentDate)
+          const daysDiff = Math.abs((incidentDateObj.getTime() - exceptionDateObj.getTime()) / (1000 * 60 * 60 * 24))
+          
+          if (daysDiff <= 7) {
+            return { data: recentIncident }
+          }
+        }
+        
+        return { data: null }
+      })()
+    ])
+    
+    const rehabPlan = rehabPlanResult.data
 
     const supervisor = userMap.get(team?.supervisor_id)
     const teamLeader = userMap.get(team?.team_leader_id)
@@ -828,6 +959,47 @@ worker.get('/cases/:id', authMiddleware, requireRole(['worker']), async (c) => {
       updatedAt: caseData.updated_at,
       return_to_work_duty_type: caseData.return_to_work_duty_type || null,
       return_to_work_date: caseData.return_to_work_date || null,
+      // Include incident photo and AI analysis (both formats for backward compatibility)
+      // Convert R2 URLs to proxy URLs to avoid DNS resolution issues
+      incidentPhotoUrl: incidentResult.data?.id 
+        ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'worker') 
+        : null,
+      incidentId: incidentResult.data?.id || null,
+      incidentAiAnalysis: (() => {
+        // Parse AI analysis if available
+        if (incidentResult.data?.ai_analysis_result) {
+          try {
+            if (typeof incidentResult.data.ai_analysis_result === 'string') {
+              return JSON.parse(incidentResult.data.ai_analysis_result)
+            }
+            return incidentResult.data.ai_analysis_result
+          } catch (parseError) {
+            return null
+          }
+        }
+        return null
+      })(),
+        incident: {
+          photoUrl: incidentResult.data?.id 
+            ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'worker') 
+            : null,
+          incidentId: incidentResult.data?.id || null,
+          aiAnalysis: (() => {
+          if (incidentResult.data?.ai_analysis_result) {
+            try {
+              if (typeof incidentResult.data.ai_analysis_result === 'string') {
+                return JSON.parse(incidentResult.data.ai_analysis_result)
+              }
+              return incidentResult.data.ai_analysis_result
+            } catch (parseError) {
+              return null
+            }
+          }
+          return null
+        })(),
+        description: incidentResult.data?.description || null,
+        severity: incidentResult.data?.severity || null,
+      },
     }
 
     return c.json({ case: formattedCase }, 200)
@@ -1065,6 +1237,66 @@ worker.get('/streak', authMiddleware, requireRole(['worker']), async (c) => {
 
   } catch (error: any) {
     console.error('[GET /worker/streak] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get incident photo (proxy endpoint to serve R2 images)
+// This avoids DNS resolution issues with R2 public URLs
+worker.get('/incident-photo/:incidentId', async (c) => {
+  try {
+    const incidentId = c.req.param('incidentId')
+    
+    if (!incidentId) {
+      return c.json({ error: 'Incident ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get incident's photo URL
+    const { data: incident, error: incidentError } = await adminClient
+      .from('incidents')
+      .select('photo_url, user_id')
+      .eq('id', incidentId)
+      .single()
+
+    if (incidentError || !incident) {
+      return c.json({ error: 'Incident not found' }, 404)
+    }
+
+    if (!incident.photo_url) {
+      return c.json({ error: 'Incident photo not found' }, 404)
+    }
+
+    // Extract file path from R2 URL using centralized utility
+    const filePath = extractR2FilePath(incident.photo_url)
+
+    if (!filePath) {
+      // If we can't extract path, try to redirect
+      console.warn(`[GET /worker/incident-photo/:incidentId] Could not extract file path from URL: ${incident.photo_url}`)
+      return c.redirect(incident.photo_url)
+    }
+
+    // Fetch image from R2
+    try {
+      const imageBuffer = await getFromR2(filePath)
+      
+      // Determine content type from file extension using centralized utility
+      const contentType = getContentTypeFromFilePath(filePath)
+
+      // Set appropriate headers
+      c.header('Content-Type', contentType)
+      c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year
+      c.header('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
+      
+      return c.body(imageBuffer as any)
+    } catch (r2Error: any) {
+      console.error(`[GET /worker/incident-photo/:incidentId] Error fetching from R2:`, r2Error)
+      // Fallback: redirect to original URL
+      return c.redirect(incident.photo_url)
+    }
+  } catch (error: any) {
+    console.error('[GET /worker/incident-photo/:incidentId] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })

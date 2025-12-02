@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './RecoveryPlan.css'
 
 interface Exercise {
@@ -40,6 +41,7 @@ export function RecoveryPlan() {
   const [dayCompleted, setDayCompleted] = useState(false)
   const [nextAvailableTime, setNextAvailableTime] = useState<Date | null>(null)
   const [canProceed, setCanProceed] = useState(true)
+  const [, setTimeUpdate] = useState(0) // Force re-render to update time display
 
   useEffect(() => {
     fetchPlan()
@@ -48,15 +50,15 @@ export function RecoveryPlan() {
   const fetchPlan = async () => {
     try {
       setLoading(true)
-      const response = await fetch(`${API_BASE_URL}/api/checkins/rehabilitation-plan`, {
-        credentials: 'include',
-      })
+      const result = await apiClient.get<{ plan: RehabilitationPlan }>(
+        API_ROUTES.CHECKINS.REHABILITATION_PLAN
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch rehabilitation plan')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch rehabilitation plan')
       }
 
-      const data = await response.json()
+      const data = result.data
       
       if (data.plan) {
         setPlan(data.plan)
@@ -109,14 +111,12 @@ export function RecoveryPlan() {
         totalExercises
       })
       
-      const response = await fetch(
-        `${API_BASE_URL}/api/checkins/rehabilitation-plan/completions?plan_id=${planId}&date=${currentDayDateStr}`,
-        { credentials: 'include' }
+      const result = await apiClient.get<{ completed_exercise_ids: string[] }>(
+        `${API_ROUTES.CHECKINS.REHABILITATION_PLAN_COMPLETIONS}?plan_id=${planId}&date=${currentDayDateStr}`
       )
       
-      if (response.ok) {
-        const data = await response.json()
-        const completedSet = new Set(data.completed_exercise_ids || [])
+      if (!isApiError(result)) {
+        const completedSet = new Set(result.data.completed_exercise_ids || [])
         setCompletedExercisesToday(completedSet)
         
         console.log('[RecoveryPlan] Completions received:', {
@@ -157,11 +157,14 @@ export function RecoveryPlan() {
   }
 
   // Update canProceed status every minute to check if 6 AM has passed
+  // Also force re-render to update the time display
   useEffect(() => {
     if (dayCompleted && nextAvailableTime) {
       const checkAvailability = () => {
         const now = new Date()
         setCanProceed(now >= nextAvailableTime!)
+        // Force re-render to update time display
+        setTimeUpdate(prev => prev + 1)
       }
       
       checkAvailability()
@@ -176,18 +179,16 @@ export function RecoveryPlan() {
 
     try {
       setCompleting(true)
-      const response = await fetch(`${API_BASE_URL}/api/checkins/rehabilitation-plan/complete-exercise`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.CHECKINS.REHABILITATION_PLAN_COMPLETE_EXERCISE,
+        {
           plan_id: plan.id,
           exercise_id: plan.exercises[currentExerciseIndex].id,
-        }),
-      })
+        }
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to mark exercise as completed')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to mark exercise as completed')
       }
 
       // Immediately update the completed exercises state to disable the button
@@ -280,7 +281,7 @@ export function RecoveryPlan() {
     const now = new Date()
     const diff = nextAvailableTime.getTime() - now.getTime()
     
-    if (diff <= 0) return null
+    if (diff <= 0) return 'Available now'
     
     const hours = Math.floor(diff / (1000 * 60 * 60))
     const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60))
@@ -289,6 +290,17 @@ export function RecoveryPlan() {
       return `${hours} hour${hours > 1 ? 's' : ''} and ${minutes} minute${minutes !== 1 ? 's' : ''}`
     }
     return `${minutes} minute${minutes !== 1 ? 's' : ''}`
+  }
+
+  const formatNextWarmUpTime = (date: Date): string => {
+    return date.toLocaleDateString('en-US', { 
+      weekday: 'short',
+      month: 'short', 
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true 
+    })
   }
 
   const extractYouTubeId = (url: string | null): string | null => {
@@ -472,14 +484,21 @@ export function RecoveryPlan() {
                         </button>
                       </p>
                     ) : (
-                      <p>
-                        Next warm-up available: {getNextWarmUpTime()}
-                        {formatTimeUntilNext() && (
-                          <span style={{ display: 'block', marginTop: '4px', fontSize: '14px', color: '#64748b' }}>
-                            (in {formatTimeUntilNext()})
-                          </span>
+                      <div style={{ marginTop: '16px', padding: '16px', backgroundColor: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: '8px' }}>
+                        <div style={{ marginBottom: '8px' }}>
+                          <h4 style={{ margin: '0 0 4px 0', fontSize: '16px', fontWeight: 600, color: '#065F46' }}>
+                            Daily Warm-Up
+                          </h4>
+                          <p style={{ margin: '0 0 8px 0', fontSize: '14px', color: '#047857' }}>
+                            Spine & Hips Primer • 6 minutes
+                          </p>
+                        </div>
+                        {nextAvailableTime && (
+                          <p style={{ margin: 0, fontSize: '13px', color: '#059669', fontWeight: 500 }}>
+                            Next warm-up: {formatNextWarmUpTime(nextAvailableTime)} ({formatTimeUntilNext() || 'Available now'})
+                          </p>
                         )}
-                      </p>
+                      </div>
                     )}
                   </>
                 ) : (

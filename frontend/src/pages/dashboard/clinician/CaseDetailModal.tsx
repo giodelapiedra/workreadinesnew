@@ -1,6 +1,12 @@
 import { useState, useEffect } from 'react'
 import { Loading } from '../../../components/Loading'
-import { API_BASE_URL } from '../../../config/api'
+import { parseNotes } from '../../../utils/notesParser'
+import { formatDutyTypeLabel } from '../../../utils/dutyTypeUtils'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { getTodayDateString } from '../../../shared/date'
+import type { AiAnalysisResult, IncidentData } from '../../../components/incident/types'
+import { IncidentPhoto, AiAnalysis } from '../../../components/incident'
 import './CaseDetailModal.css'
 
 interface CaseDetailModalProps {
@@ -24,6 +30,8 @@ interface CaseDetail {
     phone: string
     role: string
     initials: string
+    gender?: string | null
+    age?: number | null
   }
   team: {
     teamName?: string
@@ -45,10 +53,14 @@ interface CaseDetail {
     type: string
     severity: string
     description: string
+    photoUrl?: string | null
+    aiAnalysis?: any | null
   }
   caseStatus: CaseStatus // Internal case status
   approvedBy?: string // Name of clinician who approved/closed the case
   approvedAt?: string // Date when case was approved/closed
+  returnToWorkDutyType?: 'modified' | 'full' // Type of duty when returning to work
+  returnToWorkDate?: string // Date when worker returns to work
 }
 
 const STATUS_STAGES: { key: CaseStatus; label: string; icon: React.ReactElement }[] = [
@@ -138,18 +150,51 @@ const getStatusColor = (status: CaseStatus): string => {
 }
 
 // Helper to parse notes JSON safely
-const parseNotes = (notes: string | null | undefined): any => {
-  if (!notes) return null
-  try {
-    return JSON.parse(notes)
-  } catch {
-    return null
-  }
-}
+// Removed: Using shared utility from notesParser.ts
 
 // Helper to format incident type
 const formatIncidentType = (type: string): string => {
   return type.charAt(0).toUpperCase() + type.slice(1).replace('_', ' ')
+}
+
+// Reusable SVG Icons (to avoid duplication)
+const Icons = {
+  CloseIcon: ({ size = 20 }: { size?: number }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <line x1="18" y1="6" x2="6" y2="18"></line>
+      <line x1="6" y1="6" x2="18" y2="18"></line>
+    </svg>
+  ),
+  PrintIcon: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="6 9 6 2 18 2 18 9"></polyline>
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+      <rect x="6" y="14" width="12" height="8"></rect>
+    </svg>
+  ),
+  UpdateIcon: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+    </svg>
+  ),
+  UserIcon: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+      <circle cx="12" cy="7" r="4"></circle>
+    </svg>
+  ),
+  CheckIcon: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+  ),
+  AlertIcon: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+      <line x1="12" y1="9" x2="12" y2="13"></line>
+      <line x1="12" y1="17" x2="12.01" y2="17"></line>
+    </svg>
+  ),
 }
 
 export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalProps) {
@@ -159,10 +204,17 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
   const [error, setError] = useState('')
   const [showUpdateModal, setShowUpdateModal] = useState(false)
   const [updateAlert, setUpdateAlert] = useState<string | null>(null)
+  const [showReturnToWorkModal, setShowReturnToWorkModal] = useState(false)
+  const [returnToWorkData, setReturnToWorkData] = useState({
+    dutyType: 'modified' as 'modified' | 'full',
+    returnDate: ''
+  })
+  const [hasActiveRehabPlan, setHasActiveRehabPlan] = useState(false)
 
   useEffect(() => {
     if (caseId) {
       fetchCaseDetail()
+      checkActiveRehabPlans()
     }
   }, [caseId])
 
@@ -173,19 +225,18 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
       setLoading(true)
       setError('')
 
-      // Fetch case details
-      const response = await fetch(`${API_BASE_URL}/api/clinician/cases?status=all&limit=500`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' },
-      })
+      // Fetch single case detail using detail endpoint
+      const result = await apiClient.get<{ case: any }>(
+        `${API_ROUTES.CLINICIAN.CASES}/${caseId}`,
+        { headers: { 'Cache-Control': 'no-cache' } }
+      )
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch case details')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch case details')
       }
 
-      const data = await response.json()
-      const caseItem = data.cases?.find((c: any) => c.id === caseId)
+      const data = result.data
+      const caseItem = data.case
 
       if (!caseItem) {
         throw new Error('Case not found')
@@ -203,7 +254,7 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
       }
       // Priority 2: Try to get from notes field
       else if (notesData?.case_status) {
-        caseStatus = notesData.case_status
+        caseStatus = notesData.case_status as CaseStatus
       }
       
       // Priority 3: Determine from status field if still not found
@@ -220,6 +271,10 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
       // Get approval information from notes
       const approvedBy = notesData?.approved_by
       const approvedAt = notesData?.approved_at
+
+      // Get return to work information from caseItem (database columns)
+      const returnToWorkDutyType = (caseItem as any).return_to_work_duty_type as 'modified' | 'full' | undefined
+      const returnToWorkDate = (caseItem as any).return_to_work_date as string | undefined
 
       // Get the display status label
       const displayStatus = getStatusDisplayLabel(caseStatus)
@@ -238,6 +293,8 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
           phone: (caseItem as any).workerPhone || (caseItem as any).phone || 'N/A',
           role: 'WORKER',
           initials: caseItem.workerInitials,
+          gender: (caseItem as any).workerGender || null,
+          age: (caseItem as any).workerAge || null,
         },
         team: {
           teamName: caseItem.teamName,
@@ -259,10 +316,14 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
           type: caseItem.type,
           severity: 'MEDICAL TREATMENT',
           description: caseItem.reason || 'No description provided',
+          photoUrl: caseItem.incidentPhotoUrl || null,
+          aiAnalysis: caseItem.incidentAiAnalysis || null,
         },
         caseStatus,
         approvedBy,
         approvedAt,
+        returnToWorkDutyType,
+        returnToWorkDate,
       }
 
       setCaseDetail(detail)
@@ -274,24 +335,58 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
     }
   }
 
-  const handleStatusUpdate = async (newStatus: CaseStatus) => {
+  const checkActiveRehabPlans = async () => {
+    if (!caseId) return
+
+    try {
+      // Get all rehabilitation plans to check for active ones
+      const result = await apiClient.get<{ plans: any[] }>(
+        `${API_ROUTES.CLINICIAN.REHABILITATION_PLANS}?status=active`
+      )
+
+      if (isApiError(result)) {
+        setHasActiveRehabPlan(false)
+        return
+      }
+
+      const plans = result.data.plans || []
+      // Check if there's an active plan for this case
+      const activePlanForCase = plans.find((p: any) => p.exceptionId === caseId)
+      setHasActiveRehabPlan(!!activePlanForCase)
+    } catch (err: any) {
+      console.error('Error checking active rehabilitation plans:', err)
+      setHasActiveRehabPlan(false)
+    }
+  }
+
+  const handleStatusUpdate = async (newStatus: CaseStatus, returnToWorkInfo?: { dutyType: 'modified' | 'full', returnDate: string }) => {
     if (!caseId || !caseDetail || updating) return
+
+    // If return_to_work, show modal first
+    if (newStatus === 'return_to_work' && !returnToWorkInfo) {
+      setShowReturnToWorkModal(true)
+      return
+    }
 
     try {
       setUpdating(true)
       setError('')
       setShowUpdateModal(false)
+      setShowReturnToWorkModal(false)
 
-      const response = await fetch(`${API_BASE_URL}/api/clinician/cases/${caseId}/status`, {
-        method: 'PATCH',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      })
+      const requestBody: any = { status: newStatus }
+      if (newStatus === 'return_to_work' && returnToWorkInfo) {
+        requestBody.return_to_work_duty_type = returnToWorkInfo.dutyType
+        requestBody.return_to_work_date = returnToWorkInfo.returnDate
+      }
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || 'Failed to update case status')
+      const result = await apiClient.patch<{ message: string }>(
+        `${API_ROUTES.CLINICIAN.CASE(caseId)}/status`,
+        requestBody
+      )
+
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to update case status')
       }
 
       // Status is saved on backend, no need for localStorage
@@ -316,6 +411,9 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
 
       // Refresh case data to get latest from server
       await fetchCaseDetail()
+      
+      // Refresh active rehabilitation plan check
+      await checkActiveRehabPlans()
 
       // Call onUpdate callback to refresh parent
       onUpdate?.()
@@ -330,7 +428,22 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
 
   const getAvailableNextStatuses = (): CaseStatus[] => {
     if (!caseDetail) return []
-    return STATUS_ORDER.filter(status => status !== caseDetail.caseStatus)
+    
+    // BUSINESS RULE: If case is "return_to_work", only allow "closed" or keep as "return_to_work"
+    if (caseDetail.caseStatus === 'return_to_work') {
+      return ['closed'] // Only allow changing to closed
+    }
+    
+    // BUSINESS RULE: If there are active rehabilitation plans, exclude return_to_work and closed
+    let availableStatuses = STATUS_ORDER.filter(status => status !== caseDetail.caseStatus)
+    
+    if (hasActiveRehabPlan) {
+      availableStatuses = availableStatuses.filter(status => 
+        status !== 'return_to_work' && status !== 'closed'
+      )
+    }
+    
+    return availableStatuses
   }
   
   const getDisplayStatus = (): string => {
@@ -578,6 +691,18 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
                   <span class="print-value">${formatDate(caseDetail.approvedAt)}</span>
                 </div>
                 ` : ''}
+                ${caseDetail.caseStatus === 'return_to_work' && caseDetail.returnToWorkDutyType ? `
+                <div class="print-row">
+                  <span class="print-label">Duty Type:</span>
+                  <span class="print-value">${formatDutyTypeLabel(caseDetail.returnToWorkDutyType)}</span>
+                </div>
+                ` : ''}
+                ${caseDetail.caseStatus === 'return_to_work' && caseDetail.returnToWorkDate ? `
+                <div class="print-row">
+                  <span class="print-label">Return Date:</span>
+                  <span class="print-value">${formatDate(caseDetail.returnToWorkDate)}</span>
+                </div>
+                ` : ''}
               </div>
 
               <div class="print-section">
@@ -667,61 +792,45 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
     <div className="case-detail-overlay" onClick={onClose}>
       <div className="case-detail-modal" onClick={(e) => e.stopPropagation()}>
         <div className="case-detail-header">
-          <div>
+          <div className="case-header-main">
+            <div className="case-header-title-section">
             <h2>Case Details</h2>
             {caseDetail && (
-              <div className="case-header-info">
+                <div className="case-header-meta">
+                  <div className="case-header-worker-info">
+                    <Icons.UserIcon />
                 <span className="case-header-worker">{caseDetail.worker.name}</span>
-                <span className="case-header-separator">•</span>
-                <span className="case-header-priority" style={getPriorityStyle(caseDetail.priority)}>
+                  </div>
+                  <div className="case-header-priority-badge" style={getPriorityStyle(caseDetail.priority)}>
                   {caseDetail.priority}
-                </span>
+                  </div>
               </div>
             )}
           </div>
           <div className="case-header-actions">
             <button 
               className="case-action-btn print-btn" 
-              title="Print"
+                title="Print case details"
               onClick={handlePrint}
               disabled={!caseDetail}
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="6 9 6 2 18 2 18 9"></polyline>
-                <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
-                <rect x="6" y="14" width="12" height="8"></rect>
-              </svg>
-              Print
+                <Icons.PrintIcon />
+                <span>Print</span>
             </button>
             <button 
               className="case-action-btn update-btn" 
               onClick={() => setShowUpdateModal(true)}
               disabled={updating}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-              </svg>
-              Update Status
-            </button>
-            <button 
-              className="case-action-btn close-btn" 
-              onClick={() => caseDetail && handleStatusUpdate('closed')}
-              disabled={updating || caseDetail?.caseStatus === 'closed'}
-              title="Close Case"
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
-              Close Case
-            </button>
-            <button className="case-detail-close" onClick={onClose}>
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <line x1="18" y1="6" x2="6" y2="18"></line>
-                <line x1="6" y1="6" x2="18" y2="18"></line>
-              </svg>
+                title="Update case status"
+              >
+                <Icons.UpdateIcon />
+                <span>Update Status</span>
             </button>
           </div>
+          </div>
+          <button className="case-detail-close" onClick={onClose} title="Close modal">
+            <Icons.CloseIcon size={20} />
+          </button>
         </div>
 
         {loading ? (
@@ -738,16 +847,23 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
             {/* Update Alert */}
             {updateAlert && (
               <div className="case-update-alert">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
+                <Icons.CheckIcon />
                 <span>{updateAlert}</span>
                 <button className="alert-close" onClick={() => setUpdateAlert(null)}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                  </svg>
+                  <Icons.CloseIcon size={16} />
                 </button>
+              </div>
+            )}
+
+            {/* Active Rehabilitation Plan Warning */}
+            {hasActiveRehabPlan && (
+              <div className="case-update-alert" style={{ 
+                backgroundColor: '#FEF3C7', 
+                borderColor: '#FCD34D',
+                color: '#92400E'
+              }}>
+                <Icons.AlertIcon />
+                <span>Active rehabilitation plans exist. Please complete or cancel all active rehabilitation plans before marking the case as "Return to Work" or "Closed".</span>
               </div>
             )}
 
@@ -798,6 +914,25 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
                         <span className="case-info-value">{formatDate(caseDetail.approvedAt)}</span>
                       </div>
                     )}
+                    {/* Show return to work information if it exists, even when status is closed */}
+                    {caseDetail.returnToWorkDutyType && (
+                      <div className="case-info-row">
+                        <span className="case-info-label">Return to Work Duty Type:</span>
+                        <span className="case-info-value" style={{ 
+                          color: '#3B82F6', 
+                          fontWeight: 600,
+                          textTransform: 'capitalize'
+                        }}>
+                          {formatDutyTypeLabel(caseDetail.returnToWorkDutyType)}
+                        </span>
+                      </div>
+                    )}
+                    {caseDetail.returnToWorkDate && (
+                      <div className="case-info-row">
+                        <span className="case-info-label">Return to Work Date:</span>
+                        <span className="case-info-value">{formatDate(caseDetail.returnToWorkDate)}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -837,6 +972,18 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
                       <span className="case-info-label">Email:</span>
                       <span className="case-info-value">{caseDetail.worker.email}</span>
                     </div>
+                    {caseDetail.worker.gender && (
+                      <div className="case-info-row">
+                        <span className="case-info-label">Gender:</span>
+                        <span className="case-info-value">{caseDetail.worker.gender.charAt(0).toUpperCase() + caseDetail.worker.gender.slice(1)}</span>
+                      </div>
+                    )}
+                    {caseDetail.worker.age !== null && caseDetail.worker.age !== undefined && (
+                      <div className="case-info-row">
+                        <span className="case-info-label">Age:</span>
+                        <span className="case-info-value">{caseDetail.worker.age} years old</span>
+                      </div>
+                    )}
                     <div className="case-info-row">
                       <span className="case-info-label">Team:</span>
                       <span className="case-info-value">{caseDetail.team.teamName || 'N/A'}</span>
@@ -879,6 +1026,16 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
               </div>
             </div>
 
+            {/* Incident Photo Section */}
+            {caseDetail.incident.photoUrl && (
+              <IncidentPhoto photoUrl={caseDetail.incident.photoUrl} />
+            )}
+
+            {/* AI Analysis Section */}
+            {caseDetail.incident.aiAnalysis && (
+              <AiAnalysis analysis={caseDetail.incident.aiAnalysis} />
+            )}
+
             {/* Case Progress Timeline */}
             <div className="case-progress-section">
               <div className="case-progress-header">
@@ -920,14 +1077,24 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
                   <div className="status-update-header">
                     <h3>Update Case Status</h3>
                     <button className="status-update-close" onClick={() => setShowUpdateModal(false)}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <line x1="18" y1="6" x2="6" y2="18"></line>
-                        <line x1="6" y1="6" x2="18" y2="18"></line>
-                      </svg>
+                      <Icons.CloseIcon size={20} />
                     </button>
                   </div>
                   <div className="status-update-content">
                     <p className="status-update-instruction">Select new status for this case:</p>
+                    {hasActiveRehabPlan && (
+                      <div style={{
+                        padding: '12px 16px',
+                        backgroundColor: '#FEF3C7',
+                        border: '1px solid #FCD34D',
+                        borderRadius: '8px',
+                        marginBottom: '16px',
+                        color: '#92400E',
+                        fontSize: '14px'
+                      }}>
+                        <strong>Note:</strong> Active rehabilitation plans exist. "Return to Work" and "Close Case" options are disabled until all active plans are completed or cancelled.
+                      </div>
+                    )}
                     <div className="status-update-options">
                       {getAvailableNextStatuses().map((status) => {
                           const config = getStatusButtonConfig(status)
@@ -954,6 +1121,140 @@ export function CaseDetailModal({ caseId, onClose, onUpdate }: CaseDetailModalPr
                         onClick={() => setShowUpdateModal(false)}
                       >
                         Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Return to Work Modal */}
+            {showReturnToWorkModal && (
+              <div className="status-update-overlay" onClick={() => setShowReturnToWorkModal(false)}>
+                <div className="status-update-modal" onClick={(e) => e.stopPropagation()}>
+                  <div className="status-update-header">
+                    <h3>Return to Work</h3>
+                    <button className="status-update-close" onClick={() => setShowReturnToWorkModal(false)}>
+                      <Icons.CloseIcon size={20} />
+                    </button>
+                  </div>
+                  <div className="status-update-content">
+                    <p className="status-update-instruction">Please provide return to work details:</p>
+                    
+                    <div style={{ marginBottom: '20px' }}>
+                      <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, color: '#374151' }}>
+                        Duty Type *
+                      </label>
+                      <div style={{ display: 'flex', gap: '12px' }}>
+                        <label style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: '8px', 
+                          padding: '12px 16px', 
+                          border: `2px solid ${returnToWorkData.dutyType === 'modified' ? '#3B82F6' : '#E5E7EB'}`,
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          backgroundColor: returnToWorkData.dutyType === 'modified' ? '#EFF6FF' : '#FFFFFF',
+                          transition: 'all 0.2s'
+                        }}>
+                          <input
+                            type="radio"
+                            name="dutyType"
+                            value="modified"
+                            checked={returnToWorkData.dutyType === 'modified'}
+                            onChange={(e) => setReturnToWorkData({ ...returnToWorkData, dutyType: 'modified' })}
+                            style={{ cursor: 'pointer' }}
+                          />
+                          <span>Modified Duties</span>
+                        </label>
+                        <label style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          gap: '8px', 
+                          padding: '12px 16px', 
+                          border: `2px solid ${returnToWorkData.dutyType === 'full' ? '#3B82F6' : '#E5E7EB'}`,
+                          borderRadius: '8px',
+                          cursor: 'pointer',
+                          backgroundColor: returnToWorkData.dutyType === 'full' ? '#EFF6FF' : '#FFFFFF',
+                          transition: 'all 0.2s'
+                        }}>
+                          <input
+                            type="radio"
+                            name="dutyType"
+                            value="full"
+                            checked={returnToWorkData.dutyType === 'full'}
+                            onChange={(e) => setReturnToWorkData({ ...returnToWorkData, dutyType: 'full' })}
+                            style={{ cursor: 'pointer' }}
+                          />
+                          <span>Full Duties</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom: '20px' }}>
+                      <label style={{ display: 'block', marginBottom: '8px', fontWeight: 500, color: '#374151' }}>
+                        Date of when this occurs *
+                      </label>
+                      <input
+                        type="date"
+                        value={returnToWorkData.returnDate}
+                        onChange={(e) => setReturnToWorkData({ ...returnToWorkData, returnDate: e.target.value })}
+                        min={getTodayDateString()} // SECURITY: Prevent selecting past dates
+                        required
+                        style={{
+                          width: '100%',
+                          padding: '10px 12px',
+                          border: '1px solid #E5E7EB',
+                          borderRadius: '6px',
+                          fontSize: '14px',
+                          fontFamily: 'inherit'
+                        }}
+                      />
+                      <p style={{ fontSize: '12px', color: '#6B7280', margin: '4px 0 0 0' }}>
+                        Select a future date for return to work
+                      </p>
+                    </div>
+
+                    <div className="status-update-footer">
+                      <button 
+                        className="status-update-cancel" 
+                        onClick={() => {
+                          setShowReturnToWorkModal(false)
+                          setReturnToWorkData({ dutyType: 'modified', returnDate: '' })
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="status-option-btn"
+                        style={{
+                          color: '#F59E0B',
+                          borderColor: '#FEF3C7',
+                          backgroundColor: '#FFFBEB',
+                        }}
+                        onClick={() => {
+                          // SECURITY: Client-side validation before API call
+                          if (!returnToWorkData.returnDate) {
+                            alert('Please select a return date')
+                            return
+                          }
+                          
+                          // OPTIMIZATION: Validate date is not in the past
+                          const selectedDate = new Date(returnToWorkData.returnDate)
+                          const today = new Date()
+                          today.setHours(0, 0, 0, 0)
+                          selectedDate.setHours(0, 0, 0, 0)
+                          
+                          if (selectedDate < today) {
+                            alert('Return date cannot be in the past')
+                            return
+                          }
+                          
+                          handleStatusUpdate('return_to_work', returnToWorkData)
+                        }}
+                        disabled={updating || !returnToWorkData.returnDate}
+                      >
+                        {updating ? 'Updating...' : 'Confirm Return to Work'}
                       </button>
                     </div>
                   </div>

@@ -1,10 +1,13 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../../contexts/AuthContext'
 import { DashboardLayout } from '../../../components/DashboardLayout'
 import { SupervisorBusinessInfoModal } from '../../../components/SupervisorBusinessInfoModal'
-import { API_BASE_URL } from '../../../config/api'
 import { PROTECTED_ROUTES } from '../../../config/routes'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
+import { calculateAge } from '../../../shared/date'
+import { validateBirthday } from '../../../utils/validationUtils'
 import './SupervisorDashboard.css'
 
 interface TeamCompliance {
@@ -50,6 +53,8 @@ export function SupervisorDashboard() {
   const [showCreateTeamLeaderModal, setShowCreateTeamLeaderModal] = useState(false)
   const [createTeamLeaderLoading, setCreateTeamLeaderLoading] = useState(false)
   const [createTeamLeaderError, setCreateTeamLeaderError] = useState<string | null>(null)
+  const [showSuccessToast, setShowSuccessToast] = useState(false)
+  const [successToastMessage, setSuccessToastMessage] = useState('')
   
   // Form state for creating team leader
   const [teamLeaderForm, setTeamLeaderForm] = useState({
@@ -59,7 +64,17 @@ export function SupervisorDashboard() {
     last_name: '',
     team_name: '',
     site_location: '',
+    gender: '' as 'male' | 'female' | '',
+    date_of_birth: '',
   })
+  const [birthMonth, setBirthMonth] = useState('')
+  const [birthDay, setBirthDay] = useState('')
+  const [birthYear, setBirthYear] = useState('')
+  const [birthdayError, setBirthdayError] = useState('')
+
+  // OPTIMIZATION: Pending promise cache to prevent duplicate API calls
+  const pendingFetch = useRef<Promise<void> | null>(null)
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     // Re-check business info when auth context updates
@@ -71,28 +86,67 @@ export function SupervisorDashboard() {
   }, [business_name, business_registration_number])
 
   useEffect(() => {
-    fetchTeamsData()
+    let isMounted = true
+    let isInitialized = false
+    
+    const initializeData = async () => {
+      if (!isMounted || isInitialized) return
+      isInitialized = true
+      
+      await fetchTeamsData()
+    }
+    
+    initializeData()
+    
+    return () => {
+      isMounted = false
+    }
+  }, []) // Run ONCE only
+
+  // Listen for exception updates from team leader pages and refresh dashboard
+  useEffect(() => {
+    const handleExceptionUpdate = () => {
+      // Refresh dashboard data when exception is updated
+      fetchTeamsData()
+    }
+
+    window.addEventListener('exceptionUpdated', handleExceptionUpdate)
+
+    return () => {
+      window.removeEventListener('exceptionUpdated', handleExceptionUpdate)
+    }
+  }, []) // Empty deps - fetchTeamsData is stable
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current)
+        toastTimeoutRef.current = null
+      }
+    }
   }, [])
 
   const fetchTeamsData = async () => {
-    try {
-      setLoading(true)
-      setError(null)
+    // OPTIMIZATION: Return pending promise if already fetching
+    if (pendingFetch.current) {
+      return pendingFetch.current
+    }
+    
+    const promise = (async () => {
+      try {
+        setLoading(true)
+        setError(null)
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/teams?_t=${Date.now()}`, {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-        },
-      })
+        // Add cache-busting parameter to ensure fresh data
+        const result = await apiClient.get<{ teams: any[]; totalCases?: number }>(
+          `${API_ROUTES.SUPERVISOR.TEAMS}?_t=${Date.now()}`
+        )
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch teams data')
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to fetch teams data')
       }
 
-      const data = await response.json()
+      const data = result.data
       
       if (!data.teams || data.teams.length === 0) {
         setTeams([])
@@ -108,8 +162,10 @@ export function SupervisorDashboard() {
 
       // Transform team data to include compliance metrics
       const teamsWithCompliance: TeamCompliance[] = data.teams.map((team: any) => {
-        // Use activeMemberCount (excludes workers with exceptions) for compliance calculation
-        const activeMembers = team.activeMemberCount || team.memberCount
+        // SECURITY: Use activeMemberCount (excludes workers with exceptions) for compliance calculation
+        // activeMemberCount can be 0, so we need to check if it's explicitly provided
+        const activeMemberCount = team.activeMemberCount !== undefined ? team.activeMemberCount : team.memberCount
+        const activeMembers = activeMemberCount
         const checkedInCount = team.checkInStats.green + team.checkInStats.amber
         const checkInCompletion = activeMembers > 0 
           ? Math.round((checkedInCount / activeMembers) * 100)
@@ -123,8 +179,8 @@ export function SupervisorDashboard() {
           name: team.name,
           siteLocation: team.siteLocation,
           teamLeader: team.teamLeader,
-          memberCount: team.memberCount, // Total members
-          activeMemberCount: team.activeMemberCount || team.memberCount, // Members without exceptions
+          memberCount: team.memberCount, // Total members including those with exceptions
+          activeMemberCount, // Members without active exceptions (explicitly use provided value)
           exceptionCount: team.exceptionCount || 0, // Workers with active exceptions
           checkInStats: team.checkInStats,
           checkInCompletion,
@@ -132,49 +188,97 @@ export function SupervisorDashboard() {
         }
       })
 
-      // Calculate overall metrics
+      // Calculate overall metrics - sum of activeMemberCount (excludes workers with exceptions)
       const totalTeams = teamsWithCompliance.length
-      const totalActiveMembers = teamsWithCompliance.reduce((sum, team) => sum + team.activeMemberCount, 0)
+      const totalActiveMembers = teamsWithCompliance.reduce((sum, team) => sum + (team.activeMemberCount || 0), 0)
       const teamsCompleted = teamsWithCompliance.filter(team => team.checkInCompletion === 100).length
       const totalCases = data.totalCases || 0 // Get total cases from backend
 
       setTeams(teamsWithCompliance)
       setOverallMetrics({
         totalTeams,
-        totalMembers: totalActiveMembers, // Use active members for display (excludes exceptions)
+        totalMembers: totalActiveMembers, // Active members without exceptions
         totalCases,
         teamsCompleted,
       })
-    } catch (err: any) {
-      console.error('Error fetching teams data:', err)
-      setError(err.message || 'Failed to load teams data')
-    } finally {
-      setLoading(false)
-    }
+      } catch (err: any) {
+        console.error('Error fetching teams data:', err)
+        setError(err.message || 'Failed to load teams data')
+      } finally {
+        setLoading(false)
+        pendingFetch.current = null
+      }
+    })()
+    
+    pendingFetch.current = promise
+    return promise
   }
 
   const handleViewTeamDetails = (teamId: string) => {
     navigate(`${PROTECTED_ROUTES.SUPERVISOR.TEAMS}?teamId=${teamId}`)
   }
 
-  const handleCreateTeamLeader = async () => {
+  // Use centralized validation utility
+  // Note: validateBirthday is imported from utils/validationUtils
+
+  const handleCreateTeamLeader = async (e?: React.FormEvent) => {
+    if (e) {
+      e.preventDefault()
+    }
     try {
       setCreateTeamLeaderLoading(true)
       setCreateTeamLeaderError(null)
 
-      const response = await fetch(`${API_BASE_URL}/api/supervisor/team-leaders`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(teamLeaderForm),
-      })
+      // Validate birthday from dropdowns
+      if (!birthMonth || !birthDay || !birthYear) {
+        setCreateTeamLeaderError('Date of Birth is required')
+        setCreateTeamLeaderLoading(false)
+        return
+      }
 
-      const data = await response.json()
+      // Construct date string from dropdowns
+      const dateStr = `${birthYear}-${String(birthMonth).padStart(2, '0')}-${String(birthDay).padStart(2, '0')}`
+      const birthDate = new Date(dateStr)
+      const today = new Date()
+      today.setHours(0, 0, 0, 0)
+      
+      // Validate date
+      if (isNaN(birthDate.getTime())) {
+        setCreateTeamLeaderError('Invalid date of birth')
+        setCreateTeamLeaderLoading(false)
+        return
+      }
+      
+      if (birthDate >= today) {
+        setCreateTeamLeaderError('Date of Birth must be in the past')
+        setCreateTeamLeaderLoading(false)
+        return
+      }
+      
+      // Check minimum age (18 years old)
+      const age = calculateAge(dateStr)
+      if (age === null) {
+        setCreateTeamLeaderError('Invalid date of birth')
+        setCreateTeamLeaderLoading(false)
+        return
+      }
+      if (age < 18) {
+        setCreateTeamLeaderError(`Age must be at least 18 years old. Current age: ${age} years old`)
+        setCreateTeamLeaderLoading(false)
+        return
+      }
 
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to create team leader')
+      const result = await apiClient.post<{ message: string }>(
+        API_ROUTES.SUPERVISOR.TEAM_LEADERS,
+        {
+          ...teamLeaderForm,
+          gender: teamLeaderForm.gender || undefined,
+          date_of_birth: dateStr,
+        }
+      )
+
+      if (isApiError(result)) {
+        throw new Error(getApiErrorMessage(result) || 'Failed to create team leader')
       }
 
       // Reset form and close modal
@@ -185,11 +289,28 @@ export function SupervisorDashboard() {
         last_name: '',
         team_name: '',
         site_location: '',
+        gender: '',
+        date_of_birth: '',
       })
+      setBirthMonth('')
+      setBirthDay('')
+      setBirthYear('')
+      setBirthdayError('')
       setShowCreateTeamLeaderModal(false)
       
       // Refresh teams data
       await fetchTeamsData()
+
+      setSuccessToastMessage('Team leader successfully created')
+      setShowSuccessToast(true)
+      if (toastTimeoutRef.current) {
+        clearTimeout(toastTimeoutRef.current)
+      }
+      toastTimeoutRef.current = setTimeout(() => {
+        setShowSuccessToast(false)
+        toastTimeoutRef.current = null
+      }, 3000)
+
     } catch (err: any) {
       setCreateTeamLeaderError(err.message || 'Failed to create team leader')
     } finally {
@@ -248,6 +369,16 @@ export function SupervisorDashboard() {
   return (
     <DashboardLayout>
       <div className="supervisor-dashboard">
+        {showSuccessToast && (
+          <div className="success-toast">
+            <div className="success-toast-content">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              <span>{successToastMessage || 'Action completed successfully'}</span>
+            </div>
+          </div>
+        )}
         {/* Header */}
         <header className="supervisor-header">
           <div className="supervisor-header-left">
@@ -498,100 +629,273 @@ export function SupervisorDashboard() {
         {/* Create Team Leader Modal */}
         {showCreateTeamLeaderModal && (
           <div 
-            className="supervisor-modal-overlay"
+            className="team-members-modal-overlay"
             onClick={() => !createTeamLeaderLoading && setShowCreateTeamLeaderModal(false)}
           >
             <div 
-              className="supervisor-modal-content"
+              className="team-members-modal-content"
               onClick={(e) => e.stopPropagation()}
             >
-              <h2>Create Team Leader</h2>
+              <div className="team-members-modal-header">
+                <div>
+                  <h2 className="team-members-modal-title">Create Team Leader</h2>
+                  <p className="team-members-modal-subtitle">Create a new team leader account</p>
+                </div>
+                <button 
+                  className="team-members-modal-close"
+                  onClick={() => !createTeamLeaderLoading && setShowCreateTeamLeaderModal(false)}
+                  aria-label="Close modal"
+                  disabled={createTeamLeaderLoading}
+                >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <line x1="18" y1="6" x2="6" y2="18"></line>
+                    <line x1="6" y1="6" x2="18" y2="18"></line>
+                  </svg>
+                </button>
+              </div>
 
+              <div className="team-members-modal-body">
               {createTeamLeaderError && (
-                <div className="supervisor-modal-error">
+                  <div style={{ 
+                    backgroundColor: '#FEF2F2', 
+                    border: '1px solid #FEE2E2', 
+                    borderRadius: '8px', 
+                    padding: '12px',
+                    marginBottom: '20px'
+                  }}>
+                    <p style={{ fontSize: '13px', color: '#991B1B', margin: 0 }}>
                   {createTeamLeaderError}
+                    </p>
                 </div>
               )}
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <div>
-                  <label>Email *</label>
+                <form onSubmit={(e) => { e.preventDefault(); handleCreateTeamLeader(); }}>
+                  <div className="team-members-form-group">
+                    <label className="team-members-form-label">Email *</label>
                   <input
                     type="email"
+                      className="team-members-form-input"
                     value={teamLeaderForm.email}
-                    onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, email: e.target.value })}
+                      onChange={(e) => {
+                        setTeamLeaderForm({ ...teamLeaderForm, email: e.target.value })
+                        setCreateTeamLeaderError(null)
+                      }}
+                      placeholder="Enter email address"
                     disabled={createTeamLeaderLoading}
+                      required
                   />
                 </div>
 
-                <div>
-                  <label>Password *</label>
+                  <div className="team-members-form-group">
+                    <label className="team-members-form-label">Password *</label>
                   <input
                     type="password"
+                      className="team-members-form-input"
                     value={teamLeaderForm.password}
-                    onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, password: e.target.value })}
+                      onChange={(e) => {
+                        setTeamLeaderForm({ ...teamLeaderForm, password: e.target.value })
+                        setCreateTeamLeaderError(null)
+                      }}
+                      placeholder="Enter password (min. 6 characters)"
                     disabled={createTeamLeaderLoading}
+                      minLength={6}
+                      required
                   />
                 </div>
 
                 <div style={{ display: 'flex', gap: '12px' }}>
-                  <div style={{ flex: 1 }}>
-                    <label>First Name *</label>
+                    <div className="team-members-form-group" style={{ flex: 1 }}>
+                      <label className="team-members-form-label">First Name *</label>
                     <input
                       type="text"
+                        className="team-members-form-input"
                       value={teamLeaderForm.first_name}
-                      onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, first_name: e.target.value })}
+                        onChange={(e) => {
+                          setTeamLeaderForm({ ...teamLeaderForm, first_name: e.target.value })
+                          setCreateTeamLeaderError(null)
+                        }}
+                        placeholder="Enter first name"
                       disabled={createTeamLeaderLoading}
+                        maxLength={100}
+                        required
                     />
                   </div>
 
-                  <div style={{ flex: 1 }}>
-                    <label>Last Name *</label>
+                    <div className="team-members-form-group" style={{ flex: 1 }}>
+                      <label className="team-members-form-label">Last Name *</label>
                     <input
                       type="text"
+                        className="team-members-form-input"
                       value={teamLeaderForm.last_name}
-                      onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, last_name: e.target.value })}
+                        onChange={(e) => {
+                          setTeamLeaderForm({ ...teamLeaderForm, last_name: e.target.value })
+                          setCreateTeamLeaderError(null)
+                        }}
+                        placeholder="Enter last name"
                       disabled={createTeamLeaderLoading}
+                        maxLength={100}
+                        required
                     />
                   </div>
                 </div>
 
-                <div>
-                  <label>Team Name *</label>
+                  <div className="team-members-form-group">
+                    <label className="team-members-form-label">Team Name *</label>
                   <input
                     type="text"
+                      className="team-members-form-input"
                     value={teamLeaderForm.team_name}
-                    onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, team_name: e.target.value })}
-                    disabled={createTeamLeaderLoading}
+                      onChange={(e) => {
+                        setTeamLeaderForm({ ...teamLeaderForm, team_name: e.target.value })
+                        setCreateTeamLeaderError(null)
+                      }}
                     placeholder="e.g., Team Alpha"
+                      disabled={createTeamLeaderLoading}
+                      required
                   />
                 </div>
 
-                <div>
-                  <label>Site Location (Optional)</label>
+                  <div className="team-members-form-group">
+                    <label className="team-members-form-label">Site Location (Optional)</label>
                   <input
                     type="text"
+                      className="team-members-form-input"
                     value={teamLeaderForm.site_location}
-                    onChange={(e) => setTeamLeaderForm({ ...teamLeaderForm, site_location: e.target.value })}
-                    disabled={createTeamLeaderLoading}
+                      onChange={(e) => {
+                        setTeamLeaderForm({ ...teamLeaderForm, site_location: e.target.value })
+                        setCreateTeamLeaderError(null)
+                      }}
                     placeholder="e.g., Pilbara Site A"
+                      disabled={createTeamLeaderLoading}
                   />
                 </div>
 
-                <div className="supervisor-modal-actions">
+                <div style={{ display: 'flex', gap: '12px' }}>
+                    <div className="team-members-form-group" style={{ flex: 1 }}>
+                      <label className="team-members-form-label">Gender <span className="required">*</span></label>
+                    <select
+                        className="team-members-form-input"
+                      value={teamLeaderForm.gender}
+                        onChange={(e) => {
+                          setTeamLeaderForm({ ...teamLeaderForm, gender: e.target.value as 'male' | 'female' | '' })
+                          setCreateTeamLeaderError(null)
+                        }}
+                      disabled={createTeamLeaderLoading}
+                      required
+                    >
+                      <option value="">Select Gender</option>
+                      <option value="male">Male</option>
+                      <option value="female">Female</option>
+                    </select>
+                  </div>
+
+                    <div className="team-members-form-group" style={{ flex: 1 }}>
+                      <label className="team-members-form-label">
+                        Birthday <span className="required">*</span>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginLeft: '4px', cursor: 'help' }}>
+                        <title>Select birthday</title>
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="16" x2="12" y2="12"></line>
+                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                      </svg>
+                    </label>
+                    {birthdayError && (
+                      <div className="birthday-error-message" style={{ marginBottom: '12px' }}>
+                        {birthdayError}
+                      </div>
+                    )}
+                    <div className="birthday-selects">
+                      <select
+                        value={birthMonth}
+                        onChange={(e) => {
+                          setBirthMonth(e.target.value)
+                          const validation = validateBirthday(e.target.value, birthDay, birthYear)
+                          setBirthdayError(validation.error)
+                            setCreateTeamLeaderError(null)
+                        }}
+                          className="team-members-form-input birthday-select"
+                        disabled={createTeamLeaderLoading}
+                        required
+                      >
+                        <option value="">Month</option>
+                        {['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].map((month, index) => (
+                          <option key={month} value={String(index + 1)}>{month}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={birthDay}
+                        onChange={(e) => {
+                          setBirthDay(e.target.value)
+                          const validation = validateBirthday(birthMonth, e.target.value, birthYear)
+                          setBirthdayError(validation.error)
+                            setCreateTeamLeaderError(null)
+                        }}
+                          className="team-members-form-input birthday-select"
+                        disabled={createTeamLeaderLoading}
+                        required
+                      >
+                        <option value="">Day</option>
+                        {Array.from({ length: 31 }, (_, i) => i + 1).map(day => (
+                          <option key={day} value={String(day)}>{day}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={birthYear}
+                        onChange={(e) => {
+                          setBirthYear(e.target.value)
+                          const validation = validateBirthday(birthMonth, birthDay, e.target.value)
+                          setBirthdayError(validation.error)
+                            setCreateTeamLeaderError(null)
+                        }}
+                          className="team-members-form-input birthday-select"
+                        disabled={createTeamLeaderLoading}
+                        required
+                      >
+                        <option value="">Year</option>
+                        {Array.from({ length: 100 }, (_, i) => new Date().getFullYear() - i).map(year => (
+                          <option key={year} value={String(year)}>{year}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  </div>
+                </form>
+                </div>
+
+              <div className="team-members-modal-footer">
                   <button
-                    onClick={() => setShowCreateTeamLeaderModal(false)}
+                  className="team-members-modal-close-btn"
+                  onClick={() => {
+                    if (!createTeamLeaderLoading) {
+                      setShowCreateTeamLeaderModal(false)
+                      setCreateTeamLeaderError(null)
+                      setTeamLeaderForm({
+                        email: '',
+                        password: '',
+                        first_name: '',
+                        last_name: '',
+                        team_name: '',
+                        site_location: '',
+                        gender: '',
+                        date_of_birth: '',
+                      })
+                      setBirthMonth('')
+                      setBirthDay('')
+                      setBirthYear('')
+                      setBirthdayError('')
+                    }
+                  }}
                     disabled={createTeamLeaderLoading}
                   >
                     Cancel
                   </button>
                   <button
+                  className="team-members-modal-save-btn"
                     onClick={handleCreateTeamLeader}
-                    disabled={createTeamLeaderLoading || !teamLeaderForm.email || !teamLeaderForm.password || !teamLeaderForm.first_name || !teamLeaderForm.last_name || !teamLeaderForm.team_name}
+                    disabled={createTeamLeaderLoading || !teamLeaderForm.email || !teamLeaderForm.password || !teamLeaderForm.first_name || !teamLeaderForm.last_name || !teamLeaderForm.team_name || !teamLeaderForm.gender || !birthMonth || !birthDay || !birthYear}
                   >
                     {createTeamLeaderLoading ? 'Creating...' : 'Create Team Leader'}
                   </button>
-                </div>
               </div>
             </div>
           </div>

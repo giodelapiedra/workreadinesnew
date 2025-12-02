@@ -1,8 +1,11 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../../../contexts/AuthContext'
 import { DashboardLayout } from '../../../components/DashboardLayout'
-import { API_BASE_URL } from '../../../config/api'
+import { PROTECTED_ROUTES } from '../../../config/routes'
+import { formatTime, formatDateWithWeekday } from '../../../shared/date'
+import { apiClient, isApiError, getApiErrorMessage } from '../../../lib/apiClient'
+import { API_ROUTES } from '../../../config/apiRoutes'
 import './WorkerDashboard.css'
 
 interface ShiftInfo {
@@ -51,14 +54,6 @@ const getCaseStatusColor = (caseStatus?: string): string => {
   return colorMap[caseStatus] || '#6b7280'
 }
 
-// Helper function to format time (HH:MM to 12-hour format)
-const formatTime = (timeStr: string): string => {
-  if (!timeStr) return ''
-  const [hours, minutes] = timeStr.split(':').map(Number)
-  const period = hours >= 12 ? 'PM' : 'AM'
-  const displayHours = hours % 12 || 12
-  return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
-}
 
 export function WorkerDashboard() {
   const { user, first_name, full_name, business_name } = useAuth()
@@ -66,7 +61,6 @@ export function WorkerDashboard() {
   
   // State management
   const [todayProgress, setTodayProgress] = useState(0)
-  const [streakDays] = useState(7)
   const [userName, setUserName] = useState(first_name || full_name || user?.email?.split('@')[0] || 'User')
   const [teamSite, setTeamSite] = useState<string | null>(null)
   const [hasWarmUp, setHasWarmUp] = useState(false)
@@ -96,9 +90,55 @@ export function WorkerDashboard() {
     } | null
   } | null>(null)
   const [hasAssignedSchedule, setHasAssignedSchedule] = useState(false)
+  const [todayShiftInfo, setTodayShiftInfo] = useState<ShiftInfo | null>(null)
   const [nextShiftInfo, setNextShiftInfo] = useState<ShiftInfo | null>(null)
   const [nextWarmUpTime, setNextWarmUpTime] = useState<Date | null>(null)
   const [timeUntilNext, setTimeUntilNext] = useState<string>('')
+  const [hasActiveRehabPlan, setHasActiveRehabPlan] = useState<boolean>(false)
+  const [rehabPlanStatus, setRehabPlanStatus] = useState<'active' | 'completed' | 'cancelled' | null>(null)
+  const [recoveryPlanDayCompleted, setRecoveryPlanDayCompleted] = useState<boolean>(false)
+  const recoveryPlanCheckInProgress = useRef(false)
+  const [isDataLoaded, setIsDataLoaded] = useState<boolean>(false)
+  const [showNoScheduleModal, setShowNoScheduleModal] = useState(false)
+  const [streakData, setStreakData] = useState<{
+    currentStreak: number
+    longestStreak: number
+    todayCheckInCompleted: boolean
+    nextMilestone: number | null
+    daysUntilNextMilestone: number | null
+    hasSevenDayBadge: boolean
+    totalScheduledDays: number
+    pastScheduledDays: number
+    completedDays: number
+    missedScheduleDates?: string[]
+    missedScheduleCount?: number
+    exceptionDates?: Array<{ date: string; exception_type: string; reason: string | null }>
+    nextCheckInDate: string | null
+    nextCheckInDateFormatted: string | null
+    badge: {
+      name: string
+      description: string
+      icon: string
+      achieved: boolean
+      achievedDate: string
+    } | null
+  }>({
+    currentStreak: 0,
+    longestStreak: 0,
+    todayCheckInCompleted: false,
+    nextMilestone: 7,
+    daysUntilNextMilestone: 7,
+    hasSevenDayBadge: false,
+    totalScheduledDays: 0,
+    pastScheduledDays: 0,
+    completedDays: 0,
+    missedScheduleDates: [],
+    missedScheduleCount: 0,
+    exceptionDates: [],
+    nextCheckInDate: null,
+    nextCheckInDateFormatted: null,
+    badge: null
+  })
 
   // Update countdown timer every minute
   useEffect(() => {
@@ -133,42 +173,49 @@ export function WorkerDashboard() {
   }, [nextWarmUpTime])
 
   // Calculate today's progress based on check-in and warm-up
-  const calculateProgress = (checkedIn: boolean, warmUpComplete: boolean): number => {
+  // Logic:
+  // - If worker has active exception (only warm-up required):
+  //   - Warm-up completed = 100%
+  //   - Warm-up not completed = 0%
+  // - If worker has active rehab plan (warm-up assigned):
+  //   - Check-in only = 50%
+  //   - Check-in + warm-up = 100%
+  //   - No check-in = 0%
+  // - If worker has NO active rehab plan (no warm-up assigned):
+  //   - Check-in only = 100%
+  //   - No check-in = 0%
+  const calculateProgress = (checkedIn: boolean, warmUpComplete: boolean, hasRehabPlan: boolean, hasActiveException: boolean): number => {
+    // If exception exists, only warm-up is required
+    if (hasActiveException) {
+      // Warm-up completed = 100%, otherwise 0%
+      return warmUpComplete ? 100 : 0
+    }
+    
+    // No exception - normal logic
+    if (!hasRehabPlan) {
+      // No warm-up assigned - check-in alone is 100%
+      return checkedIn ? 100 : 0
+    }
+    
+    // Warm-up assigned - need both check-in and warm-up for 100%
     if (checkedIn && warmUpComplete) return 100
-    if (checkedIn || warmUpComplete) return 50
+    if (checkedIn) return 50 // Check-in only = 50%
     return 0
   }
 
-  // Pure helper functions - no memoization needed
-  const formatNextWarmUpTime = (date: Date): string => {
-    const now = new Date()
-    const tomorrow = new Date(now)
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    tomorrow.setHours(0, 0, 0, 0)
-    
-    const isTomorrow = date.getDate() === tomorrow.getDate() && 
-                       date.getMonth() === tomorrow.getMonth() && 
-                       date.getFullYear() === tomorrow.getFullYear()
-    
-    if (isTomorrow) {
-      return `Tomorrow at ${date.toLocaleTimeString('en-US', { 
-        hour: 'numeric', 
-        minute: '2-digit',
-        hour12: true 
-      })}`
-    }
-    
+  // Format next warm-up time with date - memoized to prevent re-creation
+  const formatNextWarmUpTime = useCallback((date: Date): string => {
     return date.toLocaleDateString('en-US', { 
       weekday: 'short',
       month: 'short', 
-      day: 'numeric', 
+      day: 'numeric',
       hour: 'numeric',
       minute: '2-digit',
       hour12: true 
     })
-  }
+  }, [])
 
-  const getTimeUntilNextWarmUp = (nextTime: Date): string => {
+  const getTimeUntilNextWarmUp = useCallback((nextTime: Date): string => {
     const now = new Date()
     const diff = nextTime.getTime() - now.getTime()
     
@@ -181,32 +228,196 @@ export function WorkerDashboard() {
       return `${hours}h ${minutes}m`
     }
     return `${minutes}m`
-  }
+  }, [])
 
   // Calculate next daily warm-up time (next day at 6 AM)
-  const calculateNextWarmUpTime = () => {
+  const calculateNextWarmUpTime = (completedToday: boolean) => {
     const now = new Date()
+    if (!completedToday) {
+      return now
+    }
     const tomorrow = new Date(now)
-    tomorrow.setDate(tomorrow.getDate() + 1)
+    tomorrow.setDate(now.getDate() + 1)
     tomorrow.setHours(6, 0, 0, 0)
     return tomorrow
   }
 
-  // Load dashboard data - memoized because used in useEffect dependency
-  const loadDashboardData = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/checkins/dashboard`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      })
+  // OPTIMIZATION: Pending promise cache to prevent duplicate API calls
+  const pendingRehabCheck = useRef<Promise<void> | null>(null)
+  const pendingDashboardLoad = useRef<Promise<void> | null>(null)
+  const pendingStreakLoad = useRef<Promise<void> | null>(null)
 
-      if (!response.ok) {
-        throw new Error('Failed to load dashboard data')
+  // Fetch streak data
+  const loadStreakData = useCallback(async () => {
+    // OPTIMIZATION: Return pending promise if already in progress
+    if (pendingStreakLoad.current) {
+      return pendingStreakLoad.current
+    }
+
+    const promise = (async () => {
+      try {
+        const result = await apiClient.get<{
+          currentStreak: number
+          longestStreak: number
+          todayCheckInCompleted: boolean
+          nextMilestone: number | null
+          daysUntilNextMilestone: number | null
+          hasSevenDayBadge: boolean
+          totalScheduledDays: number
+          pastScheduledDays: number
+          completedDays: number
+          missedScheduleDates?: string[]
+          missedScheduleCount?: number
+          exceptionDates?: Array<{ date: string; exception_type: string; reason: string | null }>
+          nextCheckInDate: string | null
+          nextCheckInDateFormatted: string | null
+          badge: {
+            name: string
+            description: string
+            icon: string
+            achieved: boolean
+            achievedDate: string
+          } | null
+        }>(API_ROUTES.WORKER.STREAK)
+
+        if (isApiError(result)) {
+          console.error('[WorkerDashboard] Error loading streak data:', getApiErrorMessage(result))
+          // Keep default values on error
+          return
+        }
+
+        setStreakData(result.data)
+      } catch (error) {
+        console.error('[WorkerDashboard] Error loading streak data:', error)
+        // Keep default values on error
+      } finally {
+        pendingStreakLoad.current = null
+      }
+    })()
+
+    pendingStreakLoad.current = promise
+    return promise
+  }, [])
+
+  // Check if worker has active rehabilitation plan and get next warm-up time
+  const checkActiveRehabPlan = useCallback(async () => {
+    // OPTIMIZATION: Return pending promise if already in progress
+    if (pendingRehabCheck.current) {
+      return pendingRehabCheck.current
+    }
+    
+    // Prevent concurrent calls
+    if (recoveryPlanCheckInProgress.current) return
+    recoveryPlanCheckInProgress.current = true
+    
+    const promise = (async () => {
+      try {
+        const result = await apiClient.get<{ plan: any }>(API_ROUTES.CHECKINS.REHABILITATION_PLAN)
+
+      if (isApiError(result)) {
+        setHasActiveRehabPlan(false)
+        setRehabPlanStatus(null)
+        setRecoveryPlanDayCompleted(false)
+        setNextWarmUpTime(null)
+        return
       }
 
-      const data = await response.json()
+      const data = result.data
+      const hasPlan = !!data.plan
+      setHasActiveRehabPlan(hasPlan)
+      
+      // Store plan status if available
+      if (data.plan?.status) {
+        setRehabPlanStatus(data.plan.status)
+      } else {
+        setRehabPlanStatus(null)
+      }
+      
+      // Reset recovery plan day completed if no plan
+      if (!hasPlan) {
+        setRecoveryPlanDayCompleted(false)
+        setNextWarmUpTime(null)
+        recoveryPlanCheckInProgress.current = false
+        return
+      }
+      
+      // If there's a plan, check if current day is completed to calculate next warm-up time
+      if (hasPlan && data.plan) {
+        const plan = data.plan
+        
+        // Check if current day exercises are all completed
+        try {
+          const startParts = plan.startDate.split('T')[0].split('-')
+          const start = new Date(
+            parseInt(startParts[0]),
+            parseInt(startParts[1]) - 1,
+            parseInt(startParts[2])
+          )
+          start.setHours(0, 0, 0, 0)
+          
+          const currentDayDate = new Date(start)
+          currentDayDate.setDate(start.getDate() + (plan.currentDay - 1))
+          const currentDayDateStr = `${currentDayDate.getFullYear()}-${String(currentDayDate.getMonth() + 1).padStart(2, '0')}-${String(currentDayDate.getDate()).padStart(2, '0')}`
+          
+          // Check completions for current day
+          const completionsResult = await apiClient.get<{ completed_exercise_ids: string[] }>(
+            `${API_ROUTES.CHECKINS.REHABILITATION_PLAN_COMPLETIONS}?plan_id=${plan.id}&date=${currentDayDateStr}`
+          )
+          
+          if (!isApiError(completionsResult)) {
+            const completionsData = completionsResult.data
+            const completedSet = new Set(completionsData.completed_exercise_ids || [])
+            const allExercisesCompleted = completedSet.size === plan.exercises.length && plan.exercises.length > 0
+            
+            // If all exercises completed for current day, next warm-up is 6 AM next day
+            if (allExercisesCompleted) {
+              setRecoveryPlanDayCompleted(true)
+              const nextDayDate = new Date(currentDayDate)
+              nextDayDate.setDate(currentDayDate.getDate() + 1)
+              nextDayDate.setHours(6, 0, 0, 0) // 6:00 AM of next day
+              setNextWarmUpTime(nextDayDate)
+            } else {
+              setRecoveryPlanDayCompleted(false)
+              // If recovery plan day is not completed, we'll use warm-up completion status
+              // But we need to wait for loadDashboardData to set hasWarmUp first
+            }
+          }
+        } catch (err) {
+          console.error('[WorkerDashboard] Error checking plan completions:', err)
+        }
+      }
+      } catch (error) {
+        console.error('[WorkerDashboard] Error checking rehabilitation plan:', error)
+        setHasActiveRehabPlan(false)
+        setRehabPlanStatus(null)
+        setRecoveryPlanDayCompleted(false)
+        setNextWarmUpTime(null)
+      } finally {
+        recoveryPlanCheckInProgress.current = false
+        pendingRehabCheck.current = null
+      }
+    })()
+    
+    pendingRehabCheck.current = promise
+    return promise
+  }, [])
+
+  // Load dashboard data - memoized because used in useEffect dependency
+  const loadDashboardData = useCallback(async () => {
+    // OPTIMIZATION: Return pending promise if already in progress
+    if (pendingDashboardLoad.current) {
+      return pendingDashboardLoad.current
+    }
+    
+    const promise = (async () => {
+      try {
+        const result = await apiClient.get<any>(API_ROUTES.CHECKINS.DASHBOARD)
+
+        if (isApiError(result)) {
+          throw new Error(getApiErrorMessage(result) || 'Failed to load dashboard data')
+        }
+
+      const data = result.data
 
       // Set team info
       if (data.team?.displayName) {
@@ -215,40 +426,75 @@ export function WorkerDashboard() {
         setTeamSite(null)
       }
 
+      let warmUpCompleted = false
+
       // Set check-in status
       if (data.checkIn) {
         const checkInData = data.checkIn
-        setHasCheckedIn(checkInData.hasCheckedIn || false)
+        const hasTodayCheckIn = checkInData.hasCheckedIn || false
+        warmUpCompleted = checkInData.warmUp?.completed || false
+
+        setHasCheckedIn(hasTodayCheckIn)
         setHasActiveException(checkInData.hasActiveException || false)
         setExceptionInfo(checkInData.exception || null)
         setCheckInStatus({
-          hasCheckedIn: checkInData.hasCheckedIn || false,
+          hasCheckedIn: hasTodayCheckIn,
           hasActiveException: checkInData.hasActiveException,
           exception: checkInData.exception,
           checkIn: checkInData.checkIn
         })
-        
-        // Set warm-up status
-        if (checkInData.warmUp) {
-          setHasWarmUp(checkInData.warmUp.completed || false)
-        }
+        setHasWarmUp(warmUpCompleted)
 
-        // Calculate progress
-        setTodayProgress(calculateProgress(checkInData.hasCheckedIn || false, checkInData.warmUp?.completed || false))
+        // Progress will be recalculated in useEffect when all dependencies are available
+        // But set initial value here for immediate display
+        const warmUpCompletedForProgress = warmUpCompleted || recoveryPlanDayCompleted
+        setTodayProgress(calculateProgress(hasTodayCheckIn, warmUpCompletedForProgress, hasActiveRehabPlan, checkInData.hasActiveException || false))
+      } else {
+        setHasCheckedIn(false)
+        setHasWarmUp(false)
+        // If no check-in, progress is 0 regardless of rehab plan
+        setTodayProgress(0)
       }
 
       // Set shift info
       if (data.shift) {
+        let workerHasSchedule = false
         // Today's schedule
         if (data.shift.today) {
           const hasSchedule = data.shift.today.scheduleSource === 'team_leader'
-          setHasAssignedSchedule(hasSchedule)
+          workerHasSchedule = workerHasSchedule || hasSchedule
+          setTodayShiftInfo(data.shift.today)
+        } else {
+          setTodayShiftInfo(null)
         }
         
         // Next shift info
         if (data.shift.next) {
+          if (data.shift.next.hasShift) {
+            workerHasSchedule = true
+          }
           setNextShiftInfo(data.shift.next)
+        } else {
+          setNextShiftInfo(null)
         }
+        setHasAssignedSchedule(workerHasSchedule)
+      } else {
+        setHasAssignedSchedule(false)
+        setTodayShiftInfo(null)
+        setNextShiftInfo(null)
+      }
+
+      // Set next warm-up time based on warm-up completion
+      // Only set if recovery plan check is not in progress and day is not completed
+      // Recovery plan check will override this if day is completed
+      // If recovery plan day is not completed, use warm-up completion status
+      // Only set if there's an active rehab plan
+      if (hasActiveRehabPlan && !recoveryPlanCheckInProgress.current && !recoveryPlanDayCompleted) {
+        const calculatedTime = calculateNextWarmUpTime(warmUpCompleted)
+        setNextWarmUpTime(calculatedTime)
+      } else if (!hasActiveRehabPlan) {
+        // Clear next warm-up time if no active plan
+        setNextWarmUpTime(null)
       }
     } catch (error) {
       console.error('[WorkerDashboard] Error loading dashboard data:', error)
@@ -256,43 +502,165 @@ export function WorkerDashboard() {
       setHasCheckedIn(false)
       setHasWarmUp(false)
       setTodayProgress(0)
-      setHasAssignedSchedule(false)
-      setNextShiftInfo(null)
-    }
+        setHasAssignedSchedule(false)
+        setTodayShiftInfo(null)
+        setNextShiftInfo(null)
+        setNextWarmUpTime(calculateNextWarmUpTime(false))
+      } finally {
+        pendingDashboardLoad.current = null
+      }
+    })()
+    
+    pendingDashboardLoad.current = promise
+    return promise
   }, [])
 
-  // Fetch dashboard data and initialize warm-up time
+  // OPTIMIZATION: Single initialization effect - run ONCE only
   useEffect(() => {
     if (!user) return
 
     const displayName = first_name || full_name || user?.email?.split('@')[0] || 'User'
     setUserName(displayName)
-    loadDashboardData()
-    setNextWarmUpTime(calculateNextWarmUpTime())
-  }, [user, first_name, full_name, loadDashboardData])
+    
+    let isMounted = true
+    let isInitialized = false
+    
+    // Initialize data ONCE
+    const initializeData = async () => {
+      if (!isMounted || isInitialized) return
+      isInitialized = true
+      
+      // OPTIMIZATION: Fetch all in parallel
+      await Promise.all([
+        checkActiveRehabPlan(),
+        loadDashboardData(),
+        loadStreakData()
+      ])
+      
+      // Mark data as loaded after all fetches complete
+      if (isMounted) {
+        setIsDataLoaded(true)
+      }
+    }
+    
+    // Run immediately, no delay needed
+    initializeData()
+    
+    // Only refresh on visibility change if user went to recovery plan and came back
+    const handleVisibilityChange = () => {
+      if (!isMounted) return
+      if (document.visibilityState === 'visible' && isInitialized) {
+        // Only refresh if page was already initialized (prevents double load)
+        Promise.all([
+          checkActiveRehabPlan(),
+          loadDashboardData(),
+          loadStreakData()
+        ])
+      }
+    }
 
-  // Update next warm-up time when warm-up is completed
+    // Also refresh when window receives focus (when user navigates back)
+    const handleFocus = () => {
+      if (!isMounted) return
+      if (isInitialized) {
+        // Refresh data when user returns to the page
+        Promise.all([
+          checkActiveRehabPlan(),
+          loadDashboardData(),
+          loadStreakData()
+        ])
+      }
+    }
+    
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', handleFocus)
+    
+    return () => {
+      isMounted = false
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', handleFocus)
+    }
+  }, [user]) // ONLY depend on user, nothing else to prevent re-runs
+
+  // Update next warm-up time when warm-up completion status changes
+  // Priority: Recovery plan day completion > Warm-up completion > Available now
   useEffect(() => {
-    setNextWarmUpTime(calculateNextWarmUpTime())
-  }, [hasWarmUp])
+    // Don't update if recovery plan check is in progress
+    if (recoveryPlanCheckInProgress.current) return
+    
+    // If no active rehab plan, clear next warm-up time
+    if (!hasActiveRehabPlan) {
+      setNextWarmUpTime(null)
+      return
+    }
+    
+    // If recovery plan day is completed, don't override (it's already set by checkActiveRehabPlan)
+    if (recoveryPlanDayCompleted) return
+    
+    // Otherwise, use warm-up completion status
+    const calculatedTime = calculateNextWarmUpTime(hasWarmUp)
+    setNextWarmUpTime(calculatedTime)
+  }, [hasWarmUp, recoveryPlanDayCompleted, hasActiveRehabPlan])
+
+  // Memoize warm-up completion status (combines daily warm-up and recovery plan day completion)
+  const isWarmUpCompleted = useMemo(() => {
+    return hasWarmUp || recoveryPlanDayCompleted
+  }, [hasWarmUp, recoveryPlanDayCompleted])
+
+  // Recalculate progress whenever warm-up, check-in, rehab plan, exception, or recovery plan day completion changes
+  useEffect(() => {
+    const newProgress = calculateProgress(hasCheckedIn, isWarmUpCompleted, hasActiveRehabPlan, hasActiveException)
+    setTodayProgress(newProgress)
+  }, [hasCheckedIn, isWarmUpCompleted, hasActiveRehabPlan, hasActiveException])
 
   const handleStartWarmUp = () => {
     // Navigate to recovery plan page
     navigate('/dashboard/worker/recovery-plan')
   }
 
+  // Check if next check-in is in the future
+  const isNextCheckInInFuture = useMemo(() => {
+    if (!nextShiftInfo || !nextShiftInfo.date) return false
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const nextDate = new Date(nextShiftInfo.date)
+    nextDate.setHours(0, 0, 0, 0)
+    return nextDate > today
+  }, [nextShiftInfo])
+
   const handleCompleteCheckIn = () => {
     // Prevent navigation if already checked in
     if (hasCheckedIn) {
       return
     }
-    // Check-in page has been removed
-    // TODO: Implement check-in functionality directly on dashboard if needed
-    console.log('Check-in functionality needs to be implemented')
+    
+    // Check if there's a schedule for TODAY (not just any future schedule)
+    const hasTodaySchedule = todayShiftInfo && 
+                            todayShiftInfo.scheduleSource === 'team_leader' && 
+                            todayShiftInfo.hasShift
+    
+    // If no schedule for today, show modal (don't navigate)
+    if (!hasTodaySchedule) {
+      // Show modal if there's a future schedule, otherwise it will show "no schedule"
+      if (nextShiftInfo && nextShiftInfo.date) {
+        setShowNoScheduleModal(true)
+        return
+      }
+      // Even if no future schedule, show modal
+      setShowNoScheduleModal(true)
+      return
+    }
+    
+    // Navigate to daily check-in page only if there's a schedule for today
+    navigate(PROTECTED_ROUTES.WORKER.DAILY_CHECKIN)
   }
 
   const handleReportIncident = () => {
     navigate('/dashboard/worker/report-incident')
+  }
+
+  const handleViewAccidents = () => {
+    navigate(PROTECTED_ROUTES.WORKER.MY_ACCIDENTS)
   }
 
   return (
@@ -306,14 +674,6 @@ export function WorkerDashboard() {
             {business_name ? `${business_name} • ${teamSite || 'No team assigned'}` : (teamSite || 'No team assigned')}
           </p>
         </div>
-        <div className="worker-header-right">
-          <div className="worker-streak-badge">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2L8 8l6 2-6 2 4 6 4-6-6-2 6-2-4-6z"/>
-            </svg>
-            <span>{streakDays} day streak</span>
-          </div>
-        </div>
       </header>
 
       {/* Main Content */}
@@ -326,8 +686,12 @@ export function WorkerDashboard() {
               {todayProgress === 100 
                 ? "🎉 Excellent! You've completed everything today!" 
                 : todayProgress === 50
-                ? "Keep up the great work! One more task to complete."
-                : "Keep up the great work!"}
+                ? hasActiveRehabPlan
+                  ? "Keep up the great work! Complete your warm-up to reach 100%."
+                  : "Keep up the great work! One more task to complete."
+                : hasCheckedIn && !hasActiveRehabPlan
+                ? "Great! You've completed your check-in."
+                : "Start your day by completing your check-in!"}
             </p>
             <div className="worker-progress-wrapper">
               <div className="worker-progress-bar">
@@ -358,12 +722,228 @@ export function WorkerDashboard() {
                 display: 'flex', 
                 alignItems: 'center', 
                 gap: '6px',
-                color: hasWarmUp ? '#10b981' : '#9ca3af'
+                color: isWarmUpCompleted ? '#10b981' : '#9ca3af'
               }}>
-                {hasWarmUp ? '✓' : '○'}
+                {isWarmUpCompleted ? '✓' : '○'}
                 <span>Warm-Up</span>
               </div>
             </div>
+          </div>
+
+          {/* Streak Card */}
+          <div className="worker-card worker-streak-card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+              <h2 className="worker-card-title">
+                <span style={{ fontSize: '24px', marginRight: '8px' }}>🔥</span>
+                Check-In Streak
+              </h2>
+              {streakData.hasSevenDayBadge && streakData.badge && (
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '8px 16px',
+                  backgroundColor: '#fef3c7',
+                  borderRadius: '20px',
+                  border: '2px solid #fbbf24'
+                }}>
+                  <span style={{ fontSize: '20px' }}>{streakData.badge.icon}</span>
+                  <span style={{ 
+                    fontSize: '12px', 
+                    fontWeight: '600', 
+                    color: '#92400e',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px'
+                  }}>
+                    {streakData.badge.name}
+                  </span>
+                </div>
+              )}
+            </div>
+            
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', marginBottom: '12px' }}>
+              <span style={{ 
+                fontSize: '48px', 
+                fontWeight: '700', 
+                color: streakData.currentStreak > 0 ? '#f59e0b' : '#6b7280',
+                lineHeight: '1'
+              }}>
+                {streakData.currentStreak}
+              </span>
+              <span style={{ 
+                fontSize: '18px', 
+                color: '#6b7280',
+                fontWeight: '500'
+              }}>
+                {streakData.currentStreak === 1 ? 'day' : 'days'}
+              </span>
+            </div>
+
+            {/* Next Check-In Date */}
+            {streakData.nextCheckInDateFormatted && (
+              <div style={{ 
+                marginBottom: '16px',
+                padding: '12px',
+                backgroundColor: '#f0f9ff',
+                borderRadius: '8px',
+                border: '1px solid #bae6fd'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '16px' }}>📅</span>
+                  <span style={{ fontSize: '13px', fontWeight: '600', color: '#0369a1' }}>
+                    Next Check-In
+                  </span>
+                </div>
+                <p style={{ 
+                  margin: '0',
+                  fontSize: '14px',
+                  color: '#0c4a6e',
+                  fontWeight: '500'
+                }}>
+                  {streakData.nextCheckInDateFormatted}
+                </p>
+              </div>
+            )}
+
+            {/* Progress indicator - show progress towards total scheduled days (matching executive format) */}
+            {streakData.totalScheduledDays > 0 && (
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  marginBottom: '6px'
+                }}>
+                  <span style={{ fontSize: '12px', color: '#6b7280', fontWeight: '500' }}>
+                    Progress to total scheduled days ({streakData.totalScheduledDays} days)
+                  </span>
+                  <span style={{ fontSize: '12px', color: '#6b7280', fontWeight: '600' }}>
+                    {streakData.completedDays} / {streakData.totalScheduledDays} days
+                    {streakData.totalScheduledDays > 0 && (
+                      <span style={{ marginLeft: '8px', color: '#374151' }}>
+                        {Math.round((streakData.completedDays / streakData.totalScheduledDays) * 100)}%
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div style={{
+                  width: '100%',
+                  height: '8px',
+                  backgroundColor: '#f1f3f5',
+                  borderRadius: '4px',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    width: `${Math.min((streakData.completedDays / streakData.totalScheduledDays) * 100, 100)}%`,
+                    height: '100%',
+                    backgroundColor: streakData.completedDays > 0 ? '#f59e0b' : '#d1d5db',
+                    borderRadius: '4px',
+                    transition: 'width 0.3s ease'
+                  }}></div>
+                </div>
+                {streakData.pastScheduledDays > 0 && (
+                  <div style={{
+                    marginTop: '4px',
+                    fontSize: '11px',
+                    color: '#9ca3af',
+                    fontStyle: 'italic'
+                  }}>
+                    {streakData.pastScheduledDays} past days, {streakData.totalScheduledDays - streakData.pastScheduledDays} future days
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Next milestone indicator (7-day, 14-day, etc.) */}
+            {streakData.nextMilestone && streakData.nextMilestone > streakData.currentStreak && streakData.totalScheduledDays === 0 && (
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  marginBottom: '6px'
+                }}>
+                  <span style={{ fontSize: '12px', color: '#6b7280', fontWeight: '500' }}>
+                    Progress to {streakData.nextMilestone}-day milestone
+                  </span>
+                  <span style={{ fontSize: '12px', color: '#6b7280', fontWeight: '600' }}>
+                    {streakData.currentStreak} / {streakData.nextMilestone}
+                  </span>
+                </div>
+                <div style={{
+                  width: '100%',
+                  height: '8px',
+                  backgroundColor: '#f1f3f5',
+                  borderRadius: '4px',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    width: `${(streakData.currentStreak / streakData.nextMilestone) * 100}%`,
+                    height: '100%',
+                    backgroundColor: streakData.currentStreak > 0 ? '#f59e0b' : '#d1d5db',
+                    borderRadius: '4px',
+                    transition: 'width 0.3s ease'
+                  }}></div>
+                </div>
+              </div>
+            )}
+
+            <p style={{ 
+              margin: '0 0 16px 0',
+              fontSize: '14px',
+              color: '#6b7280'
+            }}>
+              {streakData.currentStreak === 0 
+                ? streakData.totalScheduledDays > 0
+                  ? `Start your streak! You have ${streakData.totalScheduledDays} scheduled ${streakData.totalScheduledDays === 1 ? 'day' : 'days'} from your team leader.`
+                  : "Start your streak by completing your check-in today!"
+                : streakData.currentStreak >= 7
+                ? `Amazing! You've maintained a ${streakData.currentStreak}-day streak! 🎉`
+                : streakData.totalScheduledDays > 0
+                ? `Great progress! ${streakData.completedDays} of ${streakData.totalScheduledDays} scheduled ${streakData.totalScheduledDays === 1 ? 'day' : 'days'} completed.`
+                : streakData.nextMilestone
+                ? `Keep going! ${streakData.daysUntilNextMilestone} more ${streakData.daysUntilNextMilestone === 1 ? 'day' : 'days'} until your ${streakData.nextMilestone}-day milestone!`
+                : "Keep up the great work!"}
+            </p>
+
+            {streakData.longestStreak > streakData.currentStreak && (
+              <p style={{ 
+                margin: '0',
+                fontSize: '13px',
+                color: '#9ca3af',
+                fontStyle: 'italic'
+              }}>
+                Your longest streak: {streakData.longestStreak} {streakData.longestStreak === 1 ? 'day' : 'days'}
+              </p>
+            )}
+
+            {streakData.hasSevenDayBadge && streakData.badge && (
+              <div style={{
+                marginTop: '16px',
+                padding: '12px',
+                backgroundColor: '#fef3c7',
+                borderRadius: '8px',
+                border: '1px solid #fde68a'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '18px' }}>{streakData.badge.icon}</span>
+                  <span style={{ 
+                    fontSize: '13px', 
+                    fontWeight: '600', 
+                    color: '#92400e'
+                  }}>
+                    {streakData.badge.name} Achieved!
+                  </span>
+                </div>
+                <p style={{ 
+                  margin: '0',
+                  fontSize: '12px',
+                  color: '#78350f'
+                }}>
+                  {streakData.badge.description}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Daily Tasks Grid */}
@@ -378,35 +958,27 @@ export function WorkerDashboard() {
                 </div>
                 <div className="worker-task-info">
                   <h3 className="worker-task-title">Daily Warm-Up</h3>
-                  <p className="worker-task-desc">Spine & Hips Primer • 6 minutes</p>
-                  {nextWarmUpTime && (
+                  {nextWarmUpTime && hasActiveRehabPlan && rehabPlanStatus === 'active' && (
                     <p style={{ 
                       fontSize: '12px', 
-                      color: hasWarmUp ? '#10b981' : '#6b7280',
-                      marginTop: '4px',
-                      fontWeight: 500
+                      color: '#64748B', 
+                      margin: '4px 0 0 0',
+                      fontWeight: '400'
                     }}>
-                      {hasWarmUp ? (
-                        <>
-                          <span style={{ marginRight: '4px' }}>✓</span>
-                          Next warm-up: {formatNextWarmUpTime(nextWarmUpTime)} ({timeUntilNext || getTimeUntilNextWarmUp(nextWarmUpTime)})
-                        </>
-                      ) : (
-                        <>
-                          Next warm-up: {formatNextWarmUpTime(nextWarmUpTime)} ({timeUntilNext || getTimeUntilNextWarmUp(nextWarmUpTime)})
-                        </>
-                      )}
+                      Next warm-up: {formatNextWarmUpTime(nextWarmUpTime)} {timeUntilNext && `(${timeUntilNext})`}
                     </p>
                   )}
                 </div>
               </div>
               <button 
                 onClick={handleStartWarmUp}
+                disabled={!isDataLoaded || !hasActiveRehabPlan}
                 className="worker-btn worker-btn-primary worker-btn-large"
-                disabled={hasWarmUp}
-                style={hasWarmUp ? {
-                  opacity: 0.6,
-                  cursor: 'not-allowed',
+                style={!isDataLoaded || !hasActiveRehabPlan ? {
+                  opacity: 0.5,
+                  cursor: 'not-allowed'
+                } : isWarmUpCompleted ? {
+                  opacity: 0.9,
                   backgroundColor: '#e5e7eb',
                   color: '#6b7280'
                 } : {}}
@@ -414,7 +986,7 @@ export function WorkerDashboard() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
                   <polygon points="8 5 19 12 8 19 8 5"/>
                 </svg>
-                {hasWarmUp ? 'Already Completed' : 'Start Warm-Up'}
+                {!isDataLoaded ? 'Loading...' : isWarmUpCompleted ? 'Already Completed' : 'Start Warm-Up'}
               </button>
             </div>
 
@@ -462,6 +1034,7 @@ export function WorkerDashboard() {
                       )}
                     </p>
                   ) : hasCheckedIn && checkInStatus?.checkIn ? (
+                    <>
                     <p className="worker-task-desc" style={{ color: '#10b981' }}>
                       ✓ Already checked in today • {checkInStatus.checkIn.predicted_readiness || 'Completed'}
                       {checkInStatus.checkIn.check_in_time && (
@@ -470,28 +1043,84 @@ export function WorkerDashboard() {
                         </span>
                       )}
                     </p>
-                  ) : !hasAssignedSchedule ? (
-                    <p className="worker-task-desc" style={{ color: '#ef4444' }}>
-                      {nextShiftInfo?.hasShift && nextShiftInfo.date ? (
-                        <>
+                      {todayShiftInfo && todayShiftInfo.scheduleSource !== 'none' && todayShiftInfo.checkInWindow?.windowStart && todayShiftInfo.checkInWindow?.windowEnd && (
+                        <p className="worker-task-desc" style={{ color: '#6b7280', marginTop: '4px', fontSize: '0.85em' }}>
+                          {todayShiftInfo.shiftStart && todayShiftInfo.shiftEnd ? (
+                            <span>
+                              Shift: {formatTime(todayShiftInfo.shiftStart) || todayShiftInfo.shiftStart} - {formatTime(todayShiftInfo.shiftEnd) || todayShiftInfo.shiftEnd} • Check-in window: {formatTime(todayShiftInfo.checkInWindow.windowStart) || todayShiftInfo.checkInWindow.windowStart} - {formatTime(todayShiftInfo.checkInWindow.windowEnd) || todayShiftInfo.checkInWindow.windowEnd}
+                            </span>
+                          ) : (
+                            <span>
+                              Check-in window: {formatTime(todayShiftInfo.checkInWindow.windowStart) || todayShiftInfo.checkInWindow.windowStart} - {formatTime(todayShiftInfo.checkInWindow.windowEnd) || todayShiftInfo.checkInWindow.windowEnd}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                      {hasCheckedIn && nextShiftInfo?.hasShift && nextShiftInfo.date && (
+                        <p className="worker-task-desc" style={{ color: '#3b82f6', marginTop: '8px', fontSize: '0.9em' }}>
                           📅 Next Check-In: {nextShiftInfo.formattedDate || (nextShiftInfo.dayName ? `${nextShiftInfo.dayName}, ` : '') + new Date(nextShiftInfo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                           {nextShiftInfo.shiftStart && nextShiftInfo.shiftEnd && (
                             <span style={{ fontSize: '0.85em', display: 'block', marginTop: '4px', color: '#525252' }}>
-                              {formatTime(nextShiftInfo.shiftStart)} - {formatTime(nextShiftInfo.shiftEnd)}
+                              {formatTime(nextShiftInfo.shiftStart) || nextShiftInfo.shiftStart} - {formatTime(nextShiftInfo.shiftEnd) || nextShiftInfo.shiftEnd}
                               {nextShiftInfo.checkInWindow?.windowStart && nextShiftInfo.checkInWindow?.windowEnd && (
                                 <span style={{ marginLeft: '8px' }}>
-                                  (Check-in: {formatTime(nextShiftInfo.checkInWindow.windowStart)} - {formatTime(nextShiftInfo.checkInWindow.windowEnd)})
+                                  (Check-in window: {formatTime(nextShiftInfo.checkInWindow.windowStart) || nextShiftInfo.checkInWindow.windowStart} - {formatTime(nextShiftInfo.checkInWindow.windowEnd) || nextShiftInfo.checkInWindow.windowEnd})
                                 </span>
                               )}
                             </span>
                           )}
-                        </>
-                      ) : (
-                        '⚠️ No schedule assigned • Contact Team Leader'
+                        </p>
+                      )}
+                    </>
+                  ) : hasAssignedSchedule && todayShiftInfo?.hasShift ? (
+                    <>
+                      <p className="worker-task-desc">
+                        How are you feeling? • 15 seconds
+                        {todayShiftInfo.shiftStart && todayShiftInfo.shiftEnd && (
+                          <span style={{ fontSize: '0.85em', display: 'block', marginTop: '4px', color: '#6b7280' }}>
+                            Shift: {formatTime(todayShiftInfo.shiftStart) || todayShiftInfo.shiftStart} - {formatTime(todayShiftInfo.shiftEnd) || todayShiftInfo.shiftEnd}
+                            {todayShiftInfo.checkInWindow?.windowStart && todayShiftInfo.checkInWindow?.windowEnd && (
+                              <span style={{ marginLeft: '8px' }}>
+                                (Check-in window: {formatTime(todayShiftInfo.checkInWindow.windowStart) || todayShiftInfo.checkInWindow.windowStart} - {formatTime(todayShiftInfo.checkInWindow.windowEnd) || todayShiftInfo.checkInWindow.windowEnd})
+                              </span>
+                            )}
+                          </span>
+                        )}
+                      </p>
+                      {hasCheckedIn && nextShiftInfo?.hasShift && nextShiftInfo.date && (
+                        <p className="worker-task-desc" style={{ color: '#3b82f6', marginTop: '8px', fontSize: '0.9em' }}>
+                          📅 Next Check-In: {nextShiftInfo.formattedDate || (nextShiftInfo.dayName ? `${nextShiftInfo.dayName}, ` : '') + new Date(nextShiftInfo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                          {nextShiftInfo.shiftStart && nextShiftInfo.shiftEnd && (
+                            <span style={{ fontSize: '0.85em', display: 'block', marginTop: '4px', color: '#525252' }}>
+                              {formatTime(nextShiftInfo.shiftStart) || nextShiftInfo.shiftStart} - {formatTime(nextShiftInfo.shiftEnd) || nextShiftInfo.shiftEnd}
+                              {nextShiftInfo.checkInWindow?.windowStart && nextShiftInfo.checkInWindow?.windowEnd && (
+                                <span style={{ marginLeft: '8px' }}>
+                                  (Check-in window: {formatTime(nextShiftInfo.checkInWindow.windowStart) || nextShiftInfo.checkInWindow.windowStart} - {formatTime(nextShiftInfo.checkInWindow.windowEnd) || nextShiftInfo.checkInWindow.windowEnd})
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </>
+                  ) : hasCheckedIn && nextShiftInfo?.hasShift && nextShiftInfo.date ? (
+                    <p className="worker-task-desc" style={{ color: '#3b82f6' }}>
+                      📅 Next Check-In: {nextShiftInfo.formattedDate || (nextShiftInfo.dayName ? `${nextShiftInfo.dayName}, ` : '') + new Date(nextShiftInfo.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                      {nextShiftInfo.shiftStart && nextShiftInfo.shiftEnd && (
+                        <span style={{ fontSize: '0.85em', display: 'block', marginTop: '4px', color: '#525252' }}>
+                          {formatTime(nextShiftInfo.shiftStart) || nextShiftInfo.shiftStart} - {formatTime(nextShiftInfo.shiftEnd) || nextShiftInfo.shiftEnd}
+                          {nextShiftInfo.checkInWindow?.windowStart && nextShiftInfo.checkInWindow?.windowEnd && (
+                            <span style={{ marginLeft: '8px' }}>
+                              (Check-in window: {formatTime(nextShiftInfo.checkInWindow.windowStart) || nextShiftInfo.checkInWindow.windowStart} - {formatTime(nextShiftInfo.checkInWindow.windowEnd) || nextShiftInfo.checkInWindow.windowEnd})
+                            </span>
+                          )}
+                        </span>
                       )}
                     </p>
                   ) : (
-                    <p className="worker-task-desc">How are you feeling? • 15 seconds</p>
+                    <p className="worker-task-desc" style={{ color: '#ef4444' }}>
+                      ⚠️ No schedule assigned • Contact Team Leader
+                    </p>
                   )}
                 </div>
               </div>
@@ -566,6 +1195,57 @@ export function WorkerDashboard() {
             </div>
           </div>
 
+          {/* No Schedule Modal */}
+          {showNoScheduleModal && (
+            <div className="worker-modal-overlay" onClick={() => setShowNoScheduleModal(false)}>
+              <div className="worker-modal-content" onClick={(e) => e.stopPropagation()}>
+                <div className="worker-modal-header">
+                  <div className="worker-modal-icon">📅</div>
+                  <h2 className="worker-modal-title">Daily Check-In</h2>
+                </div>
+                <div className="worker-modal-body">
+                  {nextShiftInfo && nextShiftInfo.date ? (
+                    <>
+                      <p className="worker-modal-message">
+                        You can't check in yet. Your next scheduled check-in is:
+                      </p>
+                      <div className="worker-modal-date">
+                        {formatDateWithWeekday(nextShiftInfo.date)}
+                      </div>
+                      {nextShiftInfo.shiftStart && nextShiftInfo.shiftEnd && (
+                        <div className="worker-modal-time">
+                              {formatTime(nextShiftInfo.shiftStart) || nextShiftInfo.shiftStart} - {formatTime(nextShiftInfo.shiftEnd) || nextShiftInfo.shiftEnd}
+                        </div>
+                      )}
+                      {nextShiftInfo.checkInWindow?.windowStart && nextShiftInfo.checkInWindow?.windowEnd && (
+                        <div className="worker-modal-checkin-window">
+                          Check-in window: {formatTime(nextShiftInfo.checkInWindow.windowStart) || nextShiftInfo.checkInWindow.windowStart} - {formatTime(nextShiftInfo.checkInWindow.windowEnd) || nextShiftInfo.checkInWindow.windowEnd}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <p className="worker-modal-message">
+                        You don't have a scheduled check-in for today.
+                      </p>
+                      <p className="worker-modal-message" style={{ marginTop: '12px', fontSize: '14px', color: '#64748B' }}>
+                        Please contact your Team Leader to assign you a schedule.
+                      </p>
+                    </>
+                  )}
+                </div>
+                <div className="worker-modal-footer">
+                  <button
+                    className="worker-modal-btn"
+                    onClick={() => setShowNoScheduleModal(false)}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Report Incident Card */}
           <div 
             className="worker-card worker-incident-card"
@@ -603,41 +1283,49 @@ export function WorkerDashboard() {
             </button>
           </div>
 
-          {/* Achievements Section */}
-          <div className="worker-card worker-achievements-card">
-            <h2 className="worker-card-title">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/>
-              </svg>
-              Your Achievements
-            </h2>
-            <div className="worker-achievements-grid">
-              <div className="worker-achievement-item">
-                <div className="worker-achievement-icon worker-achievement-fire">
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 2L8 8l6 2-6 2 4 6 4-6-6-2 6-2-4-6z"/>
-                  </svg>
-                </div>
-                <p className="worker-achievement-label">{streakDays} Day Streak</p>
+          {/* My Accidents Card */}
+          <div 
+            className="worker-card worker-task-card"
+            onClick={handleViewAccidents}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                handleViewAccidents()
+              }
+            }}
+            aria-label="View My Accidents"
+          >
+            <div className="worker-task-header">
+              <div className="worker-task-icon" style={{ background: '#3B82F6' }}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <line x1="16" y1="13" x2="8" y2="13"></line>
+                  <line x1="16" y1="17" x2="8" y2="17"></line>
+                </svg>
               </div>
-              <div className="worker-achievement-item">
-                <div className="worker-achievement-icon worker-achievement-check">
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                  </svg>
-                </div>
-                <p className="worker-achievement-label">100% This Week</p>
-              </div>
-              <div className="worker-achievement-item">
-                <div className="worker-achievement-icon worker-achievement-trophy">
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"/>
-                  </svg>
-                </div>
-                <p className="worker-achievement-label">Team Leader</p>
+              <div className="worker-task-info">
+                <h3 className="worker-task-title">My Accidents</h3>
+                <p className="worker-task-desc">View your accident and incident records</p>
               </div>
             </div>
+            <button 
+              onClick={(e) => {
+                e.stopPropagation()
+                handleViewAccidents()
+              }}
+              className="worker-btn worker-btn-primary worker-btn-large"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+              View Records
+            </button>
           </div>
+
         </div>
       </main>
       </div>

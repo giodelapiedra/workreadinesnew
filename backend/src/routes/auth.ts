@@ -918,7 +918,7 @@ auth.get('/me', async (c) => {
     // Get user role from database - try with regular client first
     let { data: userData, error: dbError } = await supabase
       .from('users')
-      .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number, quick_login_code, gender, date_of_birth')
+      .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number, quick_login_code, gender, date_of_birth, profile_image_url')
       .eq('id', user.id)
       .single()
 
@@ -929,7 +929,7 @@ auth.get('/me', async (c) => {
       const adminClient = getAdminClient()
       const { data: adminUserData, error: adminError } = await adminClient
         .from('users')
-        .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number, quick_login_code, gender, date_of_birth')
+        .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number, quick_login_code, gender, date_of_birth, profile_image_url')
         .eq('id', user.id)
         .single()
 
@@ -956,6 +956,7 @@ auth.get('/me', async (c) => {
             quick_login_code: null,
             gender: null,
             date_of_birth: null,
+            profile_image_url: null,
           }
         }
       } else {
@@ -997,6 +998,7 @@ auth.get('/me', async (c) => {
         quick_login_code: userData.quick_login_code || null,
         gender: userData.gender || null,
         date_of_birth: userData.date_of_birth || null,
+        profile_image_url: userData.profile_image_url || null,
       },
     })
   } catch (error: any) {
@@ -1407,6 +1409,175 @@ auth.post('/verify-password', authMiddleware, async (c) => {
     return c.json({ verified: true })
   } catch (error: any) {
     console.error('[POST /auth/verify-password] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Upload profile image (authenticated users only)
+auth.post('/profile/image', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    // Handle FormData with image file
+    const formData = await c.req.parseBody()
+    const imageFile = formData.image as File | undefined
+
+    if (!imageFile || !(imageFile instanceof File)) {
+      return c.json({ error: 'Image file is required' }, 400)
+    }
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp']
+    if (!allowedTypes.includes(imageFile.type)) {
+      return c.json({ error: 'Invalid image type. Supported: JPG, PNG, GIF, WebP' }, 400)
+    }
+
+    // Validate file size (max 5MB)
+    const maxSize = 5 * 1024 * 1024 // 5MB
+    if (imageFile.size > maxSize) {
+      return c.json({ error: 'Image file too large. Maximum size is 5MB' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Upload to Cloudflare R2 storage
+    let imageUrl: string
+    try {
+      const { uploadToR2, generateProfileImagePath } = await import('../utils/r2Storage.js')
+      const filePath = generateProfileImagePath(user.id, imageFile.name)
+      imageUrl = await uploadToR2(imageFile, filePath, imageFile.type)
+      console.log(`[POST /auth/profile/image] Image uploaded to R2: ${imageUrl}`)
+    } catch (uploadError: any) {
+      console.error('[POST /auth/profile/image] Error uploading to R2:', uploadError)
+      // Fallback to base64 if R2 upload fails (for small images only)
+      const arrayBuffer = await imageFile.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+      
+      // Only use base64 fallback for small images (< 50KB)
+      if (buffer.length < 50 * 1024) {
+        const base64 = buffer.toString('base64')
+        const mimeType = imageFile.type || 'image/jpeg'
+        imageUrl = `data:${mimeType};base64,${base64}`
+        console.warn('[POST /auth/profile/image] Using base64 fallback due to R2 upload failure')
+      } else {
+        throw new Error('Failed to upload image. R2 storage unavailable and image too large for base64 fallback.')
+      }
+    }
+
+    // Store image URL in database
+    const { data: updatedUser, error: updateError } = await adminClient
+      .from('users')
+      .update({ 
+        profile_image_url: imageUrl,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+      .select('id, profile_image_url')
+      .single()
+
+    if (updateError || !updatedUser) {
+      console.error('[POST /auth/profile/image] Error updating profile image:', updateError)
+      return c.json({ error: 'Failed to upload image', details: updateError?.message }, 500)
+    }
+
+    return c.json({
+      message: 'Profile image uploaded successfully',
+      profile_image_url: updatedUser.profile_image_url,
+    })
+  } catch (error: any) {
+    console.error('[POST /auth/profile/image] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Delete profile image (authenticated users only)
+auth.delete('/profile/image', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Remove profile image URL from database
+    const { data: updatedUser, error: updateError } = await adminClient
+      .from('users')
+      .update({ 
+        profile_image_url: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', user.id)
+      .select('id, profile_image_url')
+      .single()
+
+    if (updateError || !updatedUser) {
+      console.error('[DELETE /auth/profile/image] Error removing profile image:', updateError)
+      return c.json({ error: 'Failed to remove image', details: updateError?.message }, 500)
+    }
+
+    return c.json({
+      message: 'Profile image removed successfully',
+    })
+  } catch (error: any) {
+    console.error('[DELETE /auth/profile/image] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get profile image (public endpoint for displaying images)
+auth.get('/profile/image/:userId', async (c) => {
+  try {
+    const userId = c.req.param('userId')
+
+    if (!userId) {
+      return c.json({ error: 'User ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get user's profile image URL
+    const { data: userData, error: userError } = await adminClient
+      .from('users')
+      .select('profile_image_url')
+      .eq('id', userId)
+      .single()
+
+    if (userError || !userData) {
+      return c.json({ error: 'User not found' }, 404)
+    }
+
+    // If no profile image, return 404
+    if (!userData.profile_image_url) {
+      return c.json({ error: 'Profile image not found' }, 404)
+    }
+
+    // If it's a data URL, return it directly
+    if (userData.profile_image_url.startsWith('data:')) {
+      // Extract base64 and mime type
+      const matches = userData.profile_image_url.match(/^data:([^;]+);base64,(.+)$/)
+      if (matches) {
+        const mimeType = matches[1]
+        const base64Data = matches[2]
+        const buffer = Buffer.from(base64Data, 'base64')
+        
+        // Set appropriate headers for stable caching
+        // Use hash-based cache key to prevent unnecessary reloads
+        c.header('Content-Type', mimeType)
+        c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year, immutable
+        c.header('ETag', `"${base64Data.substring(0, 20).replace(/[^a-zA-Z0-9]/g, '')}"`) // Stable ETag
+        
+        return c.body(buffer)
+      }
+    }
+
+    // If it's a regular URL, redirect to it
+    return c.redirect(userData.profile_image_url)
+  } catch (error: any) {
+    console.error('[GET /auth/profile/image/:userId] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
