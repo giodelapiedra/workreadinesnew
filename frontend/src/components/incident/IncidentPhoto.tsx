@@ -35,7 +35,7 @@ export function IncidentPhoto({ photoUrl, altText = 'Incident photo' }: Incident
     
     // For absolute URLs (http/https), use directly
     // This is a fallback for legacy URLs
-    return url
+      return url
   }
 
   const fullUrl = getFullUrl(photoUrl)

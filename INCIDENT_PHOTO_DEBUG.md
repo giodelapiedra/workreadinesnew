@@ -37,3 +37,4 @@ The server needs to be restarted to pick up the changes.
 - Backend proxy will fetch from R2 and serve the image
 - No more ERR_NAME_NOT_RESOLVED!
 
+

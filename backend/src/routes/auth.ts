@@ -1574,7 +1574,40 @@ auth.get('/profile/image/:userId', async (c) => {
       }
     }
 
-    // If it's a regular URL, redirect to it
+    // If it's an R2 URL, fetch and serve it through proxy
+    if (userData.profile_image_url.includes('.r2.dev') || userData.profile_image_url.includes('r2.cloudflarestorage.com')) {
+      try {
+        const { extractR2FilePath, getContentTypeFromFilePath } = await import('../utils/photoUrl.js')
+        const { getFromR2 } = await import('../utils/r2Storage.js')
+        
+        // Extract file path from R2 URL
+        const filePath = extractR2FilePath(userData.profile_image_url)
+        
+        if (!filePath) {
+          console.warn(`[GET /auth/profile/image/:userId] Could not extract file path from URL: ${userData.profile_image_url}`)
+          return c.redirect(userData.profile_image_url)
+        }
+        
+        // Fetch image from R2
+        const imageBuffer = await getFromR2(filePath)
+        
+        // Determine content type from file extension
+        const contentType = getContentTypeFromFilePath(filePath)
+        
+        // Set appropriate headers
+        c.header('Content-Type', contentType)
+        c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year
+        c.header('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
+        
+        return c.body(imageBuffer as any)
+      } catch (r2Error: any) {
+        console.error(`[GET /auth/profile/image/:userId] Error fetching from R2:`, r2Error)
+        // Fallback: redirect to original URL
+        return c.redirect(userData.profile_image_url)
+      }
+    }
+    
+    // For other URLs (custom domains, CDN), redirect to it
     return c.redirect(userData.profile_image_url)
   } catch (error: any) {
     console.error('[GET /auth/profile/image/:userId] Error:', error)
