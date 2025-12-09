@@ -181,7 +181,7 @@ async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
   shiftType: 'morning' | 'afternoon' | 'night' | 'flexible'
   shiftStart?: string
   shiftEnd?: string
-  checkInWindow: { windowStart: string; windowEnd: string; recommendedStart: string; recommendedEnd: string }
+  checkInWindow?: { windowStart: string; windowEnd: string; recommendedStart: string; recommendedEnd: string }
   scheduleSource?: 'team_leader' | 'none' | 'flexible'
 }> {
   const adminClient = getAdminClient()
