@@ -3,7 +3,7 @@ import bcrypt from 'bcrypt'
 import { authMiddleware, requireRole } from '../middleware/auth.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { supabase } from '../lib/supabase.js'
-import { getTodayDateString, getFirstDayOfMonthString, dateToDateString } from '../utils/dateUtils.js'
+import { getTodayDateString, getFirstDayOfMonthString, dateToDateString } from '../utils/dateTimeUtils.js'
 
 const admin = new Hono()
 
@@ -297,7 +297,7 @@ admin.post('/users', authMiddleware, requireRole(['admin']), async (c) => {
       }
       
       // Validate minimum age (18 years old)
-      const { calculateAge } = await import('../utils/ageUtils.js')
+      const { calculateAge } = await import('../shared/date/age.js')
       const age = calculateAge(date_of_birth)
       if (age === null) {
         return c.json({ error: 'Invalid date of birth' }, 400)
@@ -1213,6 +1213,165 @@ admin.get('/clinicians/:id', authMiddleware, requireRole(['admin']), async (c) =
     })
   } catch (error: any) {
     console.error('[GET /admin/clinicians/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Get all unique businesses (admin only)
+ * Returns list of all unique business_name and business_registration_number combinations
+ */
+admin.get('/businesses', authMiddleware, requireRole(['admin']), async (c) => {
+  try {
+    const adminClient = getAdminClient()
+
+    // Get all unique business combinations
+    const { data: allUsers, error } = await adminClient
+      .from('users')
+      .select('business_name, business_registration_number')
+      .not('business_name', 'is', null)
+      .not('business_registration_number', 'is', null)
+
+    if (error) {
+      console.error('[GET /admin/businesses] Error:', error)
+      return c.json({ error: 'Failed to fetch businesses', details: error.message }, 500)
+    }
+
+    // Get unique business combinations
+    const businessMap = new Map<string, { business_name: string; business_registration_number: string; user_count: number }>()
+    
+    if (allUsers) {
+      allUsers.forEach((user: any) => {
+        if (user.business_name && user.business_registration_number) {
+          const key = `${user.business_name}|${user.business_registration_number}`
+          const existing = businessMap.get(key)
+          if (existing) {
+            existing.user_count++
+          } else {
+            businessMap.set(key, {
+              business_name: user.business_name,
+              business_registration_number: user.business_registration_number,
+              user_count: 1,
+            })
+          }
+        }
+      })
+    }
+
+    const businesses = Array.from(businessMap.values()).sort((a, b) => 
+      a.business_name.localeCompare(b.business_name)
+    )
+
+    return c.json({
+      success: true,
+      businesses,
+      total: businesses.length,
+    })
+  } catch (error: any) {
+    console.error('[GET /admin/businesses] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Get all users by business (admin only)
+ * Returns all users with matching business_name and business_registration_number
+ */
+admin.get('/businesses/:businessName/:registrationNumber/users', authMiddleware, requireRole(['admin']), async (c) => {
+  try {
+    const businessName = decodeURIComponent(c.req.param('businessName'))
+    const registrationNumber = decodeURIComponent(c.req.param('registrationNumber'))
+
+    if (!businessName || !registrationNumber) {
+      return c.json({ error: 'Business name and registration number are required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get query parameters
+    const page = parseInt(c.req.query('page') || '1')
+    const limit = Math.min(parseInt(c.req.query('limit') || '50'), 100)
+    const role = c.req.query('role') || ''
+    const search = c.req.query('search') || ''
+    const offset = (page - 1) * limit
+
+    // Build query
+    let query = adminClient
+      .from('users')
+      .select('id, email, role, first_name, last_name, full_name, business_name, business_registration_number, profile_image_url, created_at', { count: 'exact' })
+      .eq('business_name', businessName)
+      .eq('business_registration_number', registrationNumber)
+
+    // Apply role filter
+    if (role) {
+      query = query.eq('role', role)
+    }
+
+    // Get all matching users first
+    const { data: allMatchingUsers, error: fetchError, count } = await query
+      .order('created_at', { ascending: false })
+
+    if (fetchError) {
+      console.error('[GET /admin/businesses/:businessName/:registrationNumber/users] Error:', fetchError)
+      return c.json({ error: 'Failed to fetch users', details: fetchError.message }, 500)
+    }
+
+    // Filter by search term in memory if provided
+    let filteredUsers = allMatchingUsers || []
+    if (search && search.trim()) {
+      const searchLower = search.toLowerCase().trim()
+      filteredUsers = filteredUsers.filter((user: any) => {
+        const fullName = user.full_name || `${user.first_name || ''} ${user.last_name || ''}`.trim()
+        return (
+          user.email?.toLowerCase().includes(searchLower) ||
+          user.first_name?.toLowerCase().includes(searchLower) ||
+          user.last_name?.toLowerCase().includes(searchLower) ||
+          fullName.toLowerCase().includes(searchLower)
+        )
+      })
+    }
+
+    // Apply pagination
+    const total = search ? filteredUsers.length : (count || 0)
+    const paginatedUsers = filteredUsers.slice(offset, offset + limit)
+
+    // Group users by role for statistics
+    const usersByRole: Record<string, number> = {
+      worker: 0,
+      team_leader: 0,
+      supervisor: 0,
+      clinician: 0,
+      whs_control_center: 0,
+      executive: 0,
+      admin: 0,
+    }
+
+    filteredUsers.forEach((user: any) => {
+      if (user.role && usersByRole.hasOwnProperty(user.role)) {
+        usersByRole[user.role]++
+      }
+    })
+
+    return c.json({
+      success: true,
+      business_name: businessName,
+      business_registration_number: registrationNumber,
+      users: paginatedUsers,
+      statistics: {
+        total: total,
+        byRole: usersByRole,
+      },
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNext: offset + limit < total,
+        hasPrev: page > 1,
+      },
+    })
+  } catch (error: any) {
+    console.error('[GET /admin/businesses/:businessName/:registrationNumber/users] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
