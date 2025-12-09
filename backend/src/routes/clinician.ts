@@ -3,9 +3,7 @@ import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.j
 import { getCaseStatusFromNotes, mapCaseStatusToDisplay, isValidCaseStatus } from '../utils/caseStatus.js'
 import { parseIncidentNotes } from '../utils/notesParser.js'
 import { getAdminClient } from '../utils/adminClient.js'
-import { formatDateString, parseDateString } from '../utils/dateTime.js'
-import { getTodayDateString, dateToDateString } from '../utils/dateUtils.js'
-import { calculateAge } from '../utils/ageUtils.js'
+import { formatDateString, parseDateString, getTodayDateString, dateToDateString, calculateAge } from '../utils/dateTimeUtils.js'
 import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath } from '../utils/photoUrl.js'
 import { getFromR2 } from '../utils/r2Storage.js'
 
@@ -911,6 +909,11 @@ clinician.get('/cases/:id', authMiddleware, requireRole(['clinician']), async (c
         description: incidentResult.data?.description || null,
         severity: incidentResult.data?.severity || null,
       },
+      // Clinician recommendations fields
+      clinician_summary: caseData.clinician_summary || null,
+      clinician_recommendations: caseData.clinician_recommendations || null,
+      clinician_name: caseData.clinician_name || null,
+      clinician_summary_updated_at: caseData.clinician_summary_updated_at || null,
     }
 
     return c.json({ case: formattedCase }, 200, {
@@ -2088,6 +2091,94 @@ clinician.post('/cases/:id/notes', authMiddleware, requireRole(['clinician']), a
     })
   } catch (error: any) {
     console.error('[POST /clinician/cases/:id/notes] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Update clinician recommendations for a case
+clinician.post('/cases/:id/recommendations', authMiddleware, requireRole(['clinician']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const caseId = c.req.param('id')
+    if (!caseId) {
+      return c.json({ error: 'Case ID is required' }, 400)
+    }
+
+    const body = await c.req.json()
+    const { summary, recommendations } = body
+
+    // Validate input
+    if (!summary || typeof summary !== 'string' || summary.trim() === '') {
+      return c.json({ error: 'Summary is required' }, 400)
+    }
+
+    if (!recommendations || typeof recommendations !== 'string' || recommendations.trim() === '') {
+      return c.json({ error: 'Recommendations are required' }, 400)
+    }
+
+    const sanitizedSummary = sanitizeString(summary, 5000)
+    const sanitizedRecommendations = sanitizeString(recommendations, 5000)
+
+    const adminClient = getAdminClient()
+
+    // Verify case exists and belongs to this clinician
+    const { data: caseItem, error: caseError } = await adminClient
+      .from('worker_exceptions')
+      .select('id, clinician_id')
+      .eq('id', caseId)
+      .single()
+
+    if (caseError || !caseItem) {
+      console.error('[POST /clinician/cases/:id/recommendations] Case not found:', caseError)
+      return c.json({ error: 'Case not found' }, 404)
+    }
+
+    // Check if clinician is assigned to this case
+    if (caseItem.clinician_id !== user.id) {
+      return c.json({ error: 'Case not found or not assigned to you' }, 404)
+    }
+
+    // Get clinician name
+    const { data: clinicianData } = await adminClient
+      .from('users')
+      .select('first_name, last_name, full_name, email')
+      .eq('id', user.id)
+      .single()
+
+    const clinicianName = clinicianData?.full_name || 
+                         (clinicianData?.first_name && clinicianData?.last_name 
+                           ? `${clinicianData.first_name} ${clinicianData.last_name}`
+                           : clinicianData?.email || 'Unknown')
+
+    // Update case with recommendations
+    const { data: updatedCase, error: updateError } = await adminClient
+      .from('worker_exceptions')
+      .update({
+        clinician_summary: sanitizedSummary,
+        clinician_recommendations: sanitizedRecommendations,
+        clinician_name: clinicianName,
+        clinician_summary_updated_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', caseId)
+      .select()
+      .single()
+
+    if (updateError) {
+      console.error('[POST /clinician/cases/:id/recommendations] Error:', updateError)
+      return c.json({ error: 'Failed to update recommendations', details: updateError.message }, 500)
+    }
+
+    return c.json({
+      case: updatedCase,
+      message: 'Recommendations updated successfully'
+    })
+  } catch (error: any) {
+    console.error('[POST /clinician/cases/:id/recommendations] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })

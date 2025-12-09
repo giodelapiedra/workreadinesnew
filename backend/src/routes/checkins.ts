@@ -3,8 +3,9 @@ import { supabase } from '../lib/supabase.js'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.js'
 import { getCaseStatusFromNotes } from '../utils/caseStatus.js'
 import { getAdminClient } from '../utils/adminClient.js'
-import { parseTime, compareTime, formatDateString, parseDateString } from '../utils/dateTime.js'
-import { getTodayDateString, dateToDateString } from '../utils/dateUtils.js'
+import { parseTime, compareTime, formatDateString, parseDateString, getTodayDateString, dateToDateString } from '../utils/dateTimeUtils.js'
+import { formatUserFullName } from '../utils/userUtils.js'
+import { sendCheckInNotificationToTeamLeader } from '../utils/notificationUtils.js'
 
 // Date/time utilities are now imported from '../utils/dateTime'
 
@@ -527,6 +528,24 @@ checkins.get('/status', authMiddleware, requireRole(['worker']), async (c) => {
       return c.json({ error: 'Failed to check status' }, 500)
     }
 
+    // Check for pending approval incident (Red status check-in waiting for team leader)
+    let hasPendingApproval = false
+    let pendingIncident = null
+    if (checkIn && checkIn.predicted_readiness === 'Red') {
+      const { data: incident } = await adminClient
+        .from('incidents')
+        .select('id, incident_type, incident_date, approval_status, created_at')
+        .eq('user_id', user.id)
+        .eq('check_in_id', checkIn.id)
+        .eq('approval_status', 'pending_approval')
+        .single()
+
+      if (incident) {
+        hasPendingApproval = true
+        pendingIncident = incident
+      }
+    }
+
     // Check warm-up status for today
     const { data: warmUp } = await adminClient
       .from('warm_ups')
@@ -539,6 +558,8 @@ checkins.get('/status', authMiddleware, requireRole(['worker']), async (c) => {
     return c.json({
       hasCheckedIn: !!checkIn,
       hasActiveException,
+      hasPendingApproval, // New field to indicate check-in awaiting team leader approval
+      pendingIncident, // Details of the pending incident
       exception: hasActiveException ? {
         ...exception,
         case_status: caseStatus, // Include case_status from notes
@@ -976,96 +997,79 @@ checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
       return c.json({ error: 'Failed to save check-in', details: checkInError.message }, 500)
     }
 
-    // Notify Team Leader if worker is "Not fit to work" (Red status)
-    if (predictedReadiness === 'Red' && teamMember?.team_id) {
+    // Handle notifications and Red check-in incident creation
+    if (teamMember?.team_id) {
       try {
-        // Get team leader's ID from team
-        const { data: team, error: teamError } = await adminClient
-          .from('teams')
-          .select('team_leader_id, name')
-          .eq('id', teamMember.team_id)
-          .single()
-
-        if (!teamError && team && team.team_leader_id) {
-          // Get worker's details for notification
-          const { data: workerDetails } = await adminClient
+        // Get team and worker details (fetch once for efficiency)
+        const [teamResult, workerResult] = await Promise.all([
+          adminClient
+            .from('teams')
+            .select('team_leader_id, name, supervisor_id')
+            .eq('id', teamMember.team_id)
+            .single(),
+          adminClient
             .from('users')
             .select('id, email, first_name, last_name, full_name')
             .eq('id', user.id)
             .single()
+        ])
 
-          const workerName = workerDetails?.full_name || 
-                            (workerDetails?.first_name && workerDetails?.last_name
-                              ? `${workerDetails.first_name} ${workerDetails.last_name}`
-                              : workerDetails?.email || 'Unknown Worker')
+        const { data: team, error: teamError } = teamResult
+        const { data: workerDetails, error: workerError } = workerResult
 
-          // Automatically deactivate all active schedules for this worker
-          // Team leader must reactivate them when worker is fit to work again
-          let deactivatedScheduleCount = 0
-          try {
-            const { data: deactivatedSchedules, error: deactivateError } = await adminClient
-              .from('worker_schedules')
-              .update({ is_active: false })
-              .eq('worker_id', user.id)
-              .eq('is_active', true)
-              .select('id')
+        if (!teamError && !workerError && team && team.team_leader_id && workerDetails) {
+          const workerName = formatUserFullName(workerDetails)
+          let incidentId: string | undefined
 
-            if (deactivateError) {
-              console.error('[POST /checkins] Error deactivating schedules:', deactivateError)
-              // Don't fail the check-in request if schedule deactivation fails
-            } else {
-              deactivatedScheduleCount = deactivatedSchedules?.length || 0
-              if (deactivatedScheduleCount > 0) {
-                console.log(`[POST /checkins] Automatically deactivated ${deactivatedScheduleCount} active schedule(s) for worker ${workerName} (Not fit to work)`)
-              }
-            }
-          } catch (deactivateScheduleError: any) {
-            console.error('[POST /checkins] Error in schedule deactivation process:', deactivateScheduleError)
-            // Don't fail the check-in request if schedule deactivation fails
-          }
-
-          // Create notification for team leader
-          const notification = {
-            user_id: team.team_leader_id,
-            type: 'worker_not_fit_to_work',
-            title: '⚠️ Worker Not Fit to Work',
-            message: `${workerName} has submitted a check-in indicating they are not fit to work. ${deactivatedScheduleCount > 0 ? `${deactivatedScheduleCount} schedule(s) have been automatically deactivated.` : ''}`,
-            data: {
-              check_in_id: checkIn.id,
-              worker_id: user.id,
-              worker_name: workerName,
-              worker_email: workerDetails?.email || '',
+          // Create pending incident ONLY for Red status
+          if (predictedReadiness === 'Red') {
+            const incidentData = {
+              user_id: user.id,
               team_id: teamMember.team_id,
-              team_name: team.name || '',
-              check_in_date: today,
-              check_in_time: currentTime,
-              pain_level: painLevel,
-              fatigue_level: fatigueLevel,
-              sleep_quality: sleepQuality,
-              stress_level: stressLevel,
-              additional_notes: additionalNotes || null,
-              shift_start_time: shiftInfo.shiftStart || null,
-              shift_end_time: shiftInfo.shiftEnd || null,
-              shift_type: shiftInfo.shiftType,
-              schedules_deactivated: deactivatedScheduleCount,
-            },
-            is_read: false,
+              incident_type: 'check_in_red_status',
+              incident_date: today,
+              description: `Check-In ID: ${checkIn.id}\n\nWorker Notes: ${additionalNotes || 'No additional notes provided'}`,
+              severity: 'high',
+              approval_status: 'pending_approval',
+            }
+
+            const { data: incident, error: incidentError } = await adminClient
+              .from('incidents')
+              .insert([incidentData])
+              .select()
+              .single()
+
+            if (incidentError) {
+              console.error('[POST /checkins] Error creating pending incident:', incidentError)
+            } else {
+              incidentId = incident.id
+              console.log(`[POST /checkins] Created pending incident ${incident.id} for worker ${workerName}`)
+            }
           }
 
-          const { error: notifyError } = await adminClient
-            .from('notifications')
-            .insert([notification])
-
-          if (notifyError) {
-            console.error('[POST /checkins] Error creating notification for team leader:', notifyError)
-            // Don't fail the check-in request if notification fails
-          } else {
-            console.log(`[POST /checkins] Notification sent to team leader ${team.team_leader_id} for worker ${workerName} (Not fit to work)`)
-          }
+          // Send notification to Team Leader for ALL check-ins (centralized utility)
+          await sendCheckInNotificationToTeamLeader({
+            teamLeaderId: team.team_leader_id,
+            workerId: user.id,
+            workerName,
+            workerEmail: workerDetails.email || user.email || '',
+            teamId: teamMember.team_id,
+            teamName: team.name || '',
+            checkInId: checkIn.id,
+            checkInDate: today,
+            checkInTime: currentTime,
+            painLevel,
+            fatigueLevel,
+            sleepQuality,
+            stressLevel,
+            additionalNotes,
+            predictedReadiness,
+            incidentId,
+          })
         }
-      } catch (notificationError: any) {
-        console.error('[POST /checkins] Error in notification process:', notificationError)
-        // Don't fail the check-in request if notification fails
+      } catch (error: any) {
+        console.error('[POST /checkins] Error in notification/incident process:', error)
+        // Don't fail the check-in request if notification/incident fails
       }
     }
 
@@ -1344,6 +1348,179 @@ checkins.get('/rehabilitation-plan', authMiddleware, requireRole(['worker']), as
     })
   } catch (error: any) {
     console.error('[GET /checkins/rehabilitation-plan] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get rehabilitation plan progress by exception_id (for viewing case details)
+checkins.get('/rehabilitation-plan/progress', authMiddleware, requireRole(['worker']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const exceptionId = c.req.query('exception_id')
+    if (!exceptionId) {
+      return c.json({ error: 'exception_id is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // SECURITY: Verify the exception belongs to the current user
+    const { data: exception, error: exceptionError } = await adminClient
+      .from('worker_exceptions')
+      .select('id, user_id')
+      .eq('id', exceptionId)
+      .eq('user_id', user.id)
+      .single()
+
+    if (exceptionError || !exception) {
+      return c.json({ error: 'Exception not found or unauthorized' }, 404)
+    }
+
+    // Get rehabilitation plan for this exception
+    const { data: plans, error: planError } = await adminClient
+      .from('rehabilitation_plans')
+      .select(`
+        *,
+        rehabilitation_exercises(
+          id,
+          exercise_name,
+          repetitions,
+          instructions,
+          video_url,
+          exercise_order
+        )
+      `)
+      .eq('exception_id', exceptionId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+
+    if (planError) {
+      console.error('[GET /checkins/rehabilitation-plan/progress] Error:', planError)
+      return c.json({ error: 'Failed to fetch rehabilitation plan', details: planError.message }, 500)
+    }
+
+    // Return 200 with null plan if no plan exists (not an error - just means clinician hasn't created one yet)
+    if (!plans || plans.length === 0) {
+      return c.json({ plan: null, message: 'No rehabilitation plan found for this case' })
+    }
+
+    const plan = plans[0]
+
+    // Sort exercises by order
+    const exercises = (plan.rehabilitation_exercises || [])
+      .sort((a: any, b: any) => a.exercise_order - b.exercise_order)
+      .map((ex: any) => ({
+        id: ex.id,
+        exercise_name: ex.exercise_name,
+        repetitions: ex.repetitions,
+        instructions: ex.instructions,
+        video_url: ex.video_url,
+        exercise_order: ex.exercise_order,
+      }))
+
+    // Get all completion records for this plan and user
+    const { data: completions } = await adminClient
+      .from('rehabilitation_plan_completions')
+      .select('completion_date, exercise_id')
+      .eq('plan_id', plan.id)
+      .eq('user_id', user.id)
+      .order('completion_date', { ascending: true })
+
+    // Group completions by date
+    const completionsByDate = new Map<string, Set<string>>()
+    if (completions) {
+      for (const completion of completions) {
+        const dateStr = typeof completion.completion_date === 'string' 
+          ? completion.completion_date.split('T')[0]
+          : formatDateString(new Date(completion.completion_date))
+        
+        if (!completionsByDate.has(dateStr)) {
+          completionsByDate.set(dateStr, new Set())
+        }
+        completionsByDate.get(dateStr)!.add(completion.exercise_id)
+      }
+    }
+
+    // Calculate progress
+    const startDate = parseDateString(plan.start_date)
+    const endDate = parseDateString(plan.end_date)
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    
+    const totalDays = Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
+
+    let currentDay = 1
+    let daysCompleted = 0
+    const now = new Date()
+
+    for (let dayOffset = 0; dayOffset < totalDays; dayOffset++) {
+      const dayDate = new Date(startDate)
+      dayDate.setDate(dayDate.getDate() + dayOffset)
+      const dayDateStr = formatDateString(dayDate)
+
+      if (dayDate > today) {
+        currentDay = dayOffset + 1
+        break
+      }
+
+      const dayCompletions = completionsByDate.get(dayDateStr) || new Set()
+      const allExercisesCompleted = exercises.length > 0 && 
+        exercises.every((ex: any) => dayCompletions.has(ex.id))
+
+      if (allExercisesCompleted) {
+        daysCompleted++
+        
+        if (dayOffset < totalDays - 1) {
+          const nextDayDate = new Date(dayDate)
+          nextDayDate.setDate(dayDate.getDate() + 1)
+          nextDayDate.setHours(6, 0, 0, 0)
+          
+          if (now >= nextDayDate) {
+            currentDay = dayOffset + 2
+          } else {
+            currentDay = dayOffset + 1
+            break
+          }
+        } else {
+          currentDay = totalDays
+          break
+        }
+      } else {
+        currentDay = dayOffset + 1
+        break
+      }
+    }
+
+    currentDay = Math.min(currentDay, totalDays)
+    const progress = totalDays > 0 ? Math.round((daysCompleted / totalDays) * 100) : 0
+
+    return c.json({
+      plan: {
+        id: plan.id,
+        plan_name: plan.plan_name || 'Recovery Plan',
+        plan_description: plan.plan_description || 'Daily recovery exercises and activities',
+        duration: totalDays,
+        startDate: plan.start_date,
+        endDate: plan.end_date,
+        progress,
+        currentDay,
+        daysCompleted,
+        totalDays,
+        exercises,
+        status: plan.status,
+      },
+      completionsByDate: Object.fromEntries(
+        Array.from(completionsByDate.entries()).map(([date, exerciseIds]) => [
+          date,
+          Array.from(exerciseIds)
+        ])
+      )
+    })
+  } catch (error: any) {
+    console.error('[GET /checkins/rehabilitation-plan/progress] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })

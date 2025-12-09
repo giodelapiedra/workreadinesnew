@@ -178,7 +178,7 @@ auth.post('/register', async (c) => {
     }
     
     // Validate minimum age (18 years old)
-    const { calculateAge } = await import('../utils/ageUtils.js')
+    const { calculateAge } = await import('../shared/date/age.js')
     const age = calculateAge(date_of_birth)
     if (age === null) {
       return c.json({ error: 'Invalid date of birth' }, 400)
@@ -1285,7 +1285,7 @@ auth.patch('/profile', authMiddleware, async (c) => {
       }
       
       // Validate minimum age (18 years old)
-      const { calculateAge } = await import('../utils/ageUtils.js')
+      const { calculateAge } = await import('../shared/date/age.js')
       const age = calculateAge(date_of_birth)
       if (age === null) {
         return c.json({ error: 'Invalid date of birth' }, 400)

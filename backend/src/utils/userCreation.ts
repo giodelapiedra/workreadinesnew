@@ -7,7 +7,7 @@
 import bcrypt from 'bcrypt'
 import { supabase } from '../lib/supabase.js'
 import { getAdminClient } from './adminClient.js'
-import { calculateAge } from './ageUtils.js'
+import { calculateAge } from './dateTimeUtils.js'
 
 export interface CreateUserInput {
   email: string

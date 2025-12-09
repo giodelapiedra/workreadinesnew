@@ -3,15 +3,13 @@ import { authMiddleware, requireRole } from '../middleware/auth.js'
 import { getCaseStatusFromNotes } from '../utils/caseStatus.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { analyzeIncident } from '../utils/openai.js'
-import { getTodayDateString } from '../utils/dateUtils.js'
-import { formatDateString } from '../utils/dateTime.js'
+import { getTodayDateString, formatDateString } from '../utils/dateTimeUtils.js'
 import { getExceptionDatesForScheduledDates } from '../utils/exceptionUtils.js'
 import { 
   getScheduledDatesInRange, 
   findNextScheduledDate, 
   formatDateForDisplay 
 } from '../utils/scheduleUtils.js'
-import { calculateAge } from '../utils/ageUtils.js'
 import {
   createPendingIncident,
   notifyTeamLeaderPendingIncident,
@@ -597,9 +595,10 @@ worker.get('/cases', authMiddleware, requireRole(['worker']), async (c) => {
     
     // OPTIMIZATION: Fetch all related incidents in one query
     // Fetch all approved incidents for this worker (since it's only one user)
+    // AI analysis excluded - workers should not see this (clinician-only)
     const { data: relatedIncidents } = await adminClient
       .from('incidents')
-      .select('id, user_id, incident_date, photo_url, ai_analysis_result, description, severity')
+      .select('id, user_id, incident_date, photo_url, description, severity')
       .eq('user_id', user.id)
       .eq('approval_status', 'approved')
       .order('created_at', { ascending: false })
@@ -699,44 +698,7 @@ worker.get('/cases', authMiddleware, requireRole(['worker']), async (c) => {
           
           return null
         })(),
-        incidentAiAnalysis: (() => {
-          // Try exact match first
-          const incidentKey = `${incident.user_id}_${incident.start_date}`
-          const exactMatch = incidentMap.get(incidentKey)
-          if (exactMatch?.ai_analysis_result) {
-            try {
-              if (typeof exactMatch.ai_analysis_result === 'string') {
-                return JSON.parse(exactMatch.ai_analysis_result)
-              }
-              return exactMatch.ai_analysis_result
-            } catch {
-              return null
-            }
-          }
-          
-          // Fallback: Find incident within 7 days
-          const userIncidents = userIncidentsMap.get(incident.user_id) || []
-          const exceptionDate = new Date(incident.start_date)
-          exceptionDate.setHours(0, 0, 0, 0)
-          
-          for (const inc of userIncidents) {
-            const incDate = new Date(inc.incident_date)
-            incDate.setHours(0, 0, 0, 0)
-            const daysDiff = Math.abs((incDate.getTime() - exceptionDate.getTime()) / (1000 * 60 * 60 * 24))
-            if (daysDiff <= 7 && inc.ai_analysis_result) {
-              try {
-                if (typeof inc.ai_analysis_result === 'string') {
-                  return JSON.parse(inc.ai_analysis_result)
-                }
-                return inc.ai_analysis_result
-              } catch {
-                return null
-              }
-            }
-          }
-          
-          return null
-        })(),
+        // AI Analysis removed - workers should not see this in their case list (clinician-only)
       }
     })
 
@@ -837,9 +799,10 @@ worker.get('/cases/:id', authMiddleware, requireRole(['worker']), async (c) => {
       // Try exact date match first, then fallback to most recent approved incident for this user
       (async () => {
         // First try exact date match
+        // AI analysis excluded - workers should not see this (clinician-only)
         const { data: exactMatch } = await adminClient
           .from('incidents')
-          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .select('id, photo_url, incident_date, description, severity')
           .eq('user_id', caseData.user_id)
           .eq('incident_date', incidentDate)
           .eq('approval_status', 'approved')
@@ -853,9 +816,10 @@ worker.get('/cases/:id', authMiddleware, requireRole(['worker']), async (c) => {
         
         // Fallback: Get most recent approved incident for this user
         // This handles cases where dates might not match exactly due to timezone issues
+        // AI analysis excluded - workers should not see this (clinician-only)
         const { data: recentIncident } = await adminClient
           .from('incidents')
-          .select('id, photo_url, ai_analysis_result, incident_date, description, severity')
+          .select('id, photo_url, incident_date, description, severity')
           .eq('user_id', caseData.user_id)
           .eq('approval_status', 'approved')
           .order('created_at', { ascending: false })
@@ -965,38 +929,18 @@ worker.get('/cases/:id', authMiddleware, requireRole(['worker']), async (c) => {
         ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'worker') 
         : null,
       incidentId: incidentResult.data?.id || null,
-      incidentAiAnalysis: (() => {
-        // Parse AI analysis if available
-        if (incidentResult.data?.ai_analysis_result) {
-          try {
-            if (typeof incidentResult.data.ai_analysis_result === 'string') {
-              return JSON.parse(incidentResult.data.ai_analysis_result)
-            }
-            return incidentResult.data.ai_analysis_result
-          } catch (parseError) {
-            return null
-          }
-        }
-        return null
-      })(),
-        incident: {
-          photoUrl: incidentResult.data?.id 
-            ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'worker') 
-            : null,
-          incidentId: incidentResult.data?.id || null,
-          aiAnalysis: (() => {
-          if (incidentResult.data?.ai_analysis_result) {
-            try {
-              if (typeof incidentResult.data.ai_analysis_result === 'string') {
-                return JSON.parse(incidentResult.data.ai_analysis_result)
-              }
-              return incidentResult.data.ai_analysis_result
-            } catch (parseError) {
-              return null
-            }
-          }
-          return null
-        })(),
+      // AI Analysis removed - workers should not see this (clinician-only)
+      // Clinician recommendations (worker can view)
+      clinician_summary: caseData.clinician_summary || null,
+      clinician_recommendations: caseData.clinician_recommendations || null,
+      clinician_name: caseData.clinician_name || null,
+      clinician_summary_updated_at: caseData.clinician_summary_updated_at || null,
+      incident: {
+        photoUrl: incidentResult.data?.id 
+          ? getIncidentPhotoProxyUrl(incidentResult.data?.photo_url, incidentResult.data.id, 'worker') 
+          : null,
+        incidentId: incidentResult.data?.id || null,
+        // AI Analysis removed - workers should not see this (clinician-only)
         description: incidentResult.data?.description || null,
         severity: incidentResult.data?.severity || null,
       },

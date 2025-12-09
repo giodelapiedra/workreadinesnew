@@ -1,6 +1,9 @@
 /**
  * Exception utility functions to eliminate code duplication
+ * Uses centralized normalizeDate from dateTimeUtils
  */
+
+import { normalizeDate } from './dateTimeUtils.js'
 
 // Type definitions for better type safety
 export interface WorkerException {
@@ -12,17 +15,6 @@ export interface WorkerException {
   exception_type?: string
   reason?: string | null
   user_id?: string
-}
-
-/**
- * Normalize date to midnight (00:00:00.000) for accurate day-level comparison
- * @param date - Date to normalize
- * @returns Normalized date
- */
-function normalizeDateToMidnight(date: Date): Date {
-  const normalized = new Date(date)
-  normalized.setHours(0, 0, 0, 0)
-  return normalized
 }
 
 /**
@@ -42,8 +34,8 @@ export function isExceptionActive(
 
   // If exception was deactivated, check if deactivation was before or on the checkDate
   if (exception.deactivated_at) {
-    const deactivatedDate = normalizeDateToMidnight(new Date(exception.deactivated_at))
-    const normalizedCheckDate = normalizeDateToMidnight(checkDate)
+    const deactivatedDate = normalizeDate(new Date(exception.deactivated_at))
+    const normalizedCheckDate = normalizeDate(checkDate)
     
     // If deactivated before or on checkDate, exception was not active on that date
     if (deactivatedDate <= normalizedCheckDate) {
@@ -51,8 +43,8 @@ export function isExceptionActive(
     }
   }
 
-  const startDate = normalizeDateToMidnight(new Date(exception.start_date))
-  const normalizedCheckDate = normalizeDateToMidnight(checkDate)
+  const startDate = normalizeDate(new Date(exception.start_date))
+  const normalizedCheckDate = normalizeDate(checkDate)
 
   // Check if checkDate is after or equal to startDate
   if (normalizedCheckDate < startDate) {
@@ -64,7 +56,7 @@ export function isExceptionActive(
     return true
   }
 
-  const endDate = normalizeDateToMidnight(new Date(exception.end_date))
+  const endDate = normalizeDate(new Date(exception.end_date))
 
   // Check if checkDate is before or equal to endDate
   return normalizedCheckDate <= endDate
@@ -125,8 +117,8 @@ export function findConflictingException(
     return null
   }
 
-  const normalizedStartDate = normalizeDateToMidnight(startDate)
-  const normalizedEndDate = normalizeDateToMidnight(endDate)
+  const normalizedStartDate = normalizeDate(startDate)
+  const normalizedEndDate = normalizeDate(endDate)
   
   // Check sample dates: start, end, and middle
   const sampleDates = [
@@ -136,9 +128,9 @@ export function findConflictingException(
   ]
 
   for (const exception of exceptions) {
-    const exceptionStart = normalizeDateToMidnight(new Date(exception.start_date))
+    const exceptionStart = normalizeDate(new Date(exception.start_date))
     const exceptionEnd = exception.end_date 
-      ? normalizeDateToMidnight(new Date(exception.end_date))
+      ? normalizeDate(new Date(exception.end_date))
       : null
 
     // Check if date ranges overlap

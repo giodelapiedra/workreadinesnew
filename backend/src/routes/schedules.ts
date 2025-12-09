@@ -119,8 +119,6 @@ schedules.get('/my-schedule', authMiddleware, requireRole(['worker']), async (c)
 
     const startDate = new Date(startDateStr + 'T00:00:00.000Z')
     const endDate = new Date(endDateStr + 'T23:59:59.999Z')
-    
-    console.log(`[GET /schedules/my-schedule] Requested date range: ${startDateStr} to ${endDateStr} (${startDate.toISOString()} to ${endDate.toISOString()})`)
 
     // Get all ACTIVE schedules (both single-date and recurring)
     const { data: allSchedules, error: schedulesError } = await adminClient
@@ -134,20 +132,8 @@ schedules.get('/my-schedule', authMiddleware, requireRole(['worker']), async (c)
       return c.json({ error: 'Failed to fetch schedule', details: schedulesError.message }, 500)
     }
 
-    console.log(`[GET /schedules/my-schedule] Found ${allSchedules?.length || 0} active schedules for worker ${user.id} (${user.email})`)
-    if (allSchedules && allSchedules.length > 0) {
-      allSchedules.forEach((s: any, idx: number) => {
-        const dayName = s.day_of_week !== null ? ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][s.day_of_week] : 'Single date'
-        console.log(`[GET /schedules/my-schedule] Schedule ${idx + 1}: ${dayName} (day_of_week=${s.day_of_week}), scheduled_date=${s.scheduled_date}, effective_date=${s.effective_date}, expiry_date=${s.expiry_date}, is_active=${s.is_active}, start_time=${s.start_time}, end_time=${s.end_time}`)
-      })
-    } else {
-      console.log(`[GET /schedules/my-schedule] No active schedules found for worker ${user.id} (${user.email})`)
-    }
-
     // Process schedules to generate dates in the range (supports both single-date and recurring)
     const scheduleList: any[] = []
-
-    console.log(`[GET /schedules/my-schedule] Processing ${allSchedules?.length || 0} schedules for date range: ${startDateStr} to ${endDateStr}`)
 
     ;(allSchedules || []).forEach((schedule: any) => {
       // Single-date schedule: check if date is within range
@@ -159,10 +145,9 @@ schedules.get('/my-schedule', authMiddleware, requireRole(['worker']), async (c)
             ...schedule,
             display_date: schedule.scheduled_date,
           })
-          console.log(`[GET /schedules/my-schedule] Added single-date schedule: ${schedule.scheduled_date}`)
         }
       }
-      // Recurring schedule: calculate all matching dates in the range
+      // Recurring schedule: calculate all matching dates in the range (optimized)
       else if (schedule.day_of_week !== null && schedule.day_of_week !== undefined) {
         const effectiveDate = schedule.effective_date ? new Date(schedule.effective_date + 'T00:00:00.000Z') : startDate
         const expiryDate = schedule.expiry_date ? new Date(schedule.expiry_date + 'T23:59:59.999Z') : endDate
@@ -173,33 +158,31 @@ schedules.get('/my-schedule', authMiddleware, requireRole(['worker']), async (c)
         
         // Only process if there's an overlap
         if (scheduleStart <= scheduleEnd) {
-          console.log(`[GET /schedules/my-schedule] Processing recurring schedule: day_of_week=${schedule.day_of_week}, effective=${schedule.effective_date}, expiry=${schedule.expiry_date}, range=${scheduleStart.toISOString().split('T')[0]} to ${scheduleEnd.toISOString().split('T')[0]}`)
-        
-        // Generate dates for this recurring schedule
-          let matchCount = 0
+          // Optimized: Jump directly to first matching day of week, then skip 7 days at a time
           const currentDate = new Date(scheduleStart)
+          const targetDayOfWeek = schedule.day_of_week
           
+          // Find first matching day of week
           while (currentDate <= scheduleEnd) {
-            const dayOfWeek = currentDate.getDay() // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
-          
-          // Check if this date matches the schedule's day_of_week
-          if (dayOfWeek === schedule.day_of_week) {
-              const dateStr = currentDate.toISOString().split('T')[0]
-            scheduleList.push({
-              ...schedule,
-              display_date: dateStr, // The actual date for this occurrence
-              scheduled_date: null, // Clear scheduled_date to indicate this is from recurring
-            })
-              matchCount++
-            }
+            const dayOfWeek = currentDate.getDay()
             
+            if (dayOfWeek === targetDayOfWeek) {
+              // Found first match, now add all occurrences
+              while (currentDate <= scheduleEnd) {
+                const dateStr = currentDate.toISOString().split('T')[0]
+                scheduleList.push({
+                  ...schedule,
+                  display_date: dateStr,
+                  scheduled_date: null, // Clear scheduled_date to indicate this is from recurring
+                })
+                // Jump 7 days ahead (next week same day)
+                currentDate.setDate(currentDate.getDate() + 7)
+              }
+              break
+            }
             // Move to next day
             currentDate.setDate(currentDate.getDate() + 1)
           }
-          
-          console.log(`[GET /schedules/my-schedule] Generated ${matchCount} dates for recurring schedule (day_of_week=${schedule.day_of_week})`)
-        } else {
-          console.log(`[GET /schedules/my-schedule] Skipping recurring schedule: no overlap with requested range (effective=${schedule.effective_date}, expiry=${schedule.expiry_date})`)
         }
       }
     })
@@ -213,8 +196,6 @@ schedules.get('/my-schedule', authMiddleware, requireRole(['worker']), async (c)
       }
       return (a.start_time || '').localeCompare(b.start_time || '')
     })
-
-    console.log(`[GET /schedules/my-schedule] Returning ${scheduleList.length} schedule entries for date range ${startDateStr} to ${endDateStr}`)
 
     return c.json({ schedules: scheduleList }, 200, {
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',

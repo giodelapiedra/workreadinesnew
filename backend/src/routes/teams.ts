@@ -4,19 +4,19 @@ import { supabase } from '../lib/supabase.js'
 import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { generateUniquePinCode } from '../utils/quickLoginCode.js'
-import { formatDateString } from '../utils/dateTime.js'
 // Import optimized utility functions
-import { getTodayDateString, getTodayDate } from '../utils/dateUtils.js'
+import { formatDateString, getTodayDateString, getTodayDate } from '../utils/dateTimeUtils.js'
 import { isExceptionActive } from '../utils/exceptionUtils.js'
 import { formatTeamLeader, formatUserFullName } from '../utils/userUtils.js'
 import { encodeCursor, decodeCursor, extractCursorDate } from '../utils/cursorPagination.js'
 import {
-  getPendingIncidentsForTeam,
   approveIncident,
   rejectIncident,
   notifyIncidentApproved,
   notifyIncidentRejected,
 } from '../utils/incidentApproval.js'
+import { getFromR2 } from '../utils/r2Storage.js'
+import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath } from '../utils/photoUrl.js'
 
 const teams = new Hono<{ Variables: AuthVariables }>()
 
@@ -3472,6 +3472,18 @@ teams.get('/incidents', authMiddleware, requireRole(['team_leader']), async (c) 
     }
 
     const status = c.req.query('status') || 'pending' // 'pending', 'approved', 'rejected'
+    
+    // Pagination parameters
+    const page = parseInt(c.req.query('page') || '1')
+    const limit = Math.min(parseInt(c.req.query('limit') || '20'), 100)
+    
+    // Validate pagination
+    if (page < 1) {
+      return c.json({ error: 'Invalid pagination parameters. Page must be >= 1' }, 400)
+    }
+    if (limit < 1 || limit > 100) {
+      return c.json({ error: 'Invalid pagination parameters. Limit must be between 1 and 100' }, 400)
+    }
 
     const adminClient = getAdminClient()
 
@@ -3486,14 +3498,25 @@ teams.get('/incidents', authMiddleware, requireRole(['team_leader']), async (c) 
       return c.json({ error: 'Team not found' }, 404)
     }
 
-    // Get incidents based on status
-    let incidents
-    if (status === 'pending') {
-      // Use utility function for pending incidents
-      incidents = await getPendingIncidentsForTeam(team.id)
-    } else {
-      // For approved/rejected, query directly
-      const { data, error } = await adminClient
+    // Determine approval status based on tab
+    const approvalStatus = status === 'pending' ? 'pending_approval' : (status === 'approved' ? 'approved' : 'rejected')
+    
+    // Get total count
+    const { count, error: countError } = await adminClient
+      .from('incidents')
+      .select('*', { count: 'exact', head: true })
+      .eq('team_id', team.id)
+      .eq('approval_status', approvalStatus)
+
+    if (countError) {
+      throw new Error(`Failed to count ${status} incidents: ${countError.message}`)
+    }
+
+    const totalCount = count || 0
+
+    // Get paginated incidents
+    const offset = (page - 1) * limit
+    const { data: incidentsData, error: incidentsError } = await adminClient
         .from('incidents')
         .select(`
           *,
@@ -3503,20 +3526,65 @@ teams.get('/incidents', authMiddleware, requireRole(['team_leader']), async (c) 
           )
         `)
         .eq('team_id', team.id)
-        .eq('approval_status', status === 'approved' ? 'approved' : 'rejected')
+      .eq('approval_status', approvalStatus)
         .order('incident_date', { ascending: false })
         .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1)
 
-      if (error) {
-        throw new Error(`Failed to fetch ${status} incidents: ${error.message}`)
+    if (incidentsError) {
+      throw new Error(`Failed to fetch ${status} incidents: ${incidentsError.message}`)
       }
 
-      incidents = data || []
-    }
+    // Enrich with check-in data for check_in_red_status incidents (only for pending)
+    // Also convert photo URLs to proxy URLs to avoid DNS resolution issues
+    let incidents: any[] = incidentsData || []
+    
+    incidents = await Promise.all(
+      incidents.map(async (incident: any) => {
+        // Convert photo URL to proxy URL
+        if (incident.photo_url && incident.id) {
+          incident.photo_url = getIncidentPhotoProxyUrl(incident.photo_url, incident.id, 'teams')
+        }
+
+        // Enrich with check-in data for pending check_in_red_status incidents
+        if (status === 'pending' && incident.incident_type === 'check_in_red_status') {
+          // Extract check_in_id from description
+          const checkInIdMatch = incident.description?.match(/Check-In ID: ([a-f0-9-]+)/)
+          const checkInId = checkInIdMatch ? checkInIdMatch[1] : null
+
+          if (checkInId) {
+            // Fetch check-in data
+            const { data: checkIn } = await adminClient
+              .from('daily_checkins')
+              .select('pain_level, fatigue_level, sleep_quality, stress_level, additional_notes, check_in_time')
+              .eq('id', checkInId)
+              .single()
+
+            if (checkIn) {
+              return {
+                ...incident,
+                checkInData: checkIn,
+              }
+            }
+          }
+        }
+        return incident
+      })
+    )
+
+    const totalPages = Math.ceil(totalCount / limit)
 
     return c.json({
       success: true,
       incidents,
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
     })
   } catch (error: any) {
     console.error('[GET /teams/incidents] Error:', error)
@@ -3675,6 +3743,74 @@ teams.post('/reject-incident/:incidentId', authMiddleware, requireRole(['team_le
       error: error.message || 'Failed to reject incident', 
       details: error.message 
     }, 500)
+  }
+})
+
+// Get incident photo (proxy endpoint to serve R2 images)
+// This avoids DNS resolution issues with R2 public URLs
+teams.get('/incident-photo/:incidentId', authMiddleware, requireRole(['team_leader']), async (c) => {
+  try {
+    const incidentId = c.req.param('incidentId')
+    
+    if (!incidentId) {
+      return c.json({ error: 'Incident ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get incident's photo URL
+    const { data: incident, error: incidentError } = await adminClient
+      .from('incidents')
+      .select('photo_url, user_id')
+      .eq('id', incidentId)
+      .single()
+
+    if (incidentError || !incident) {
+      return c.json({ error: 'Incident not found' }, 404)
+    }
+
+    if (!incident.photo_url) {
+      return c.json({ error: 'Incident photo not found' }, 404)
+    }
+
+    // Helper function to normalize URL with protocol
+    const normalizeUrl = (url: string): string => {
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        return `https://${url}`
+      }
+      return url
+    }
+
+    // Extract file path from R2 URL using centralized utility
+    const filePath = extractR2FilePath(incident.photo_url)
+
+    if (!filePath) {
+      // If we can't extract path, try to redirect with normalized URL
+      console.warn(`[GET /teams/incident-photo/:incidentId] Could not extract file path from URL: ${incident.photo_url}`)
+      return c.redirect(normalizeUrl(incident.photo_url))
+    }
+
+    // Fetch image from R2
+    try {
+      const imageBuffer = await getFromR2(filePath)
+      
+      // Determine content type from file extension using centralized utility
+      const contentType = getContentTypeFromFilePath(filePath)
+
+      // Set appropriate headers
+      c.header('Content-Type', contentType)
+      c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year
+      c.header('Content-Disposition', `inline; filename="${filePath.split('/').pop()}"`)
+      
+      return c.body(imageBuffer as any)
+    } catch (r2Error: any) {
+      console.error(`[GET /teams/incident-photo/:incidentId] Error fetching from R2:`, r2Error)
+      // Fallback: redirect to original URL with normalized protocol
+      return c.redirect(normalizeUrl(incident.photo_url))
+    }
+  } catch (error: any) {
+    console.error('[GET /teams/incident-photo/:incidentId] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })
 

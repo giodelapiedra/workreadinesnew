@@ -34,6 +34,62 @@ interface TranscriptionAnalysisResult {
   actionItems: string[]
 }
 
+interface PredictiveAnalyticsData {
+  summary: {
+    totalWorkers: number
+    activeWorkers: number
+    atRiskWorkers: number
+    avgRiskScore: number
+  }
+  riskIndicators: Array<{
+    type: string
+    label: string
+    count: number
+    severity: 'low' | 'medium' | 'high' | 'critical'
+  }>
+  topRiskWorkers: Array<{
+    workerName: string
+    teamName: string
+    siteLocation: string | null
+    riskScore: number
+    redPercentage: number
+    avgPain: number
+    avgFatigue: number
+    avgSleep: number
+    avgStress: number
+  }>
+  topRiskTeams: Array<{
+    teamName: string
+    siteLocation: string | null
+    avgRiskScore: number
+    workerCount: number
+    atRiskWorkers: number
+    highRiskWorkers: number
+  }>
+  readinessTrends: Array<{
+    date: string
+    green: number
+    amber: number
+    red: number
+  }>
+  period: {
+    startDate: string
+    endDate: string
+  }
+}
+
+interface PredictiveAnalyticsAnalysisResult {
+  executiveSummary: string
+  keyInsights: string[]
+  riskPredictions: string[]
+  actionableRecommendations: string[]
+  priorityActions: string[]
+  trendAnalysis: string
+  organizationalImpact: string
+  highRiskTeams: string[]
+  topWorkersConcern: string
+}
+
 /**
  * Analyze incident report using OpenAI API
  * Optimized for cost: Uses GPT-3.5-turbo for text, GPT-4o for images
@@ -357,6 +413,127 @@ Provide your clinical analysis, extract key medical information, and suggest rec
         'Schedule follow-up if needed'
       ]
     }
+  }
+}
+
+/**
+ * Analyze predictive analytics data using OpenAI API
+ * Provides comprehensive insights and recommendations for executives
+ */
+export async function analyzePredictiveAnalytics(params: PredictiveAnalyticsData): Promise<PredictiveAnalyticsAnalysisResult> {
+  const apiKey = process.env.OPENAI_API_KEY
+  
+  if (!apiKey) {
+    throw new Error('OpenAI API key not configured')
+  }
+
+  const { OpenAI } = await import('openai')
+  const openai = new OpenAI({ apiKey })
+
+  // Build comprehensive data summary for AI
+  const topRiskWorkersSummary = params.topRiskWorkers.slice(0, 10).map((w, idx) => 
+    `${idx + 1}. ${w.workerName} (Team: ${w.teamName}${w.siteLocation ? `, Site: ${w.siteLocation}` : ''}): Risk Score ${w.riskScore.toFixed(1)}%, ${w.redPercentage.toFixed(1)}% Red check-ins, Pain: ${w.avgPain.toFixed(1)}, Fatigue: ${w.avgFatigue.toFixed(1)}, Sleep: ${w.avgSleep.toFixed(1)}h, Stress: ${w.avgStress.toFixed(1)}`
+  ).join('\n')
+
+  const topRiskTeamsSummary = params.topRiskTeams.map((t, idx) => 
+    `${idx + 1}. ${t.teamName}${t.siteLocation ? ` (${t.siteLocation})` : ''}: Avg Risk Score ${t.avgRiskScore.toFixed(1)}%, ${t.workerCount} workers, ${t.atRiskWorkers} at-risk workers (${t.highRiskWorkers} high-risk)`
+  ).join('\n')
+
+  const riskIndicatorsSummary = params.riskIndicators.map(ind => 
+    `${ind.label}: ${ind.count} workers (${ind.severity.toUpperCase()})`
+  ).join('\n')
+
+  const readinessSummary = params.readinessTrends.slice(-7).map(t => 
+    `${t.date}: Green ${t.green}, Amber ${t.amber}, Red ${t.red}`
+  ).join('\n')
+
+  const systemPrompt = `You are an expert MSK (Musculoskeletal) intelligence analyst and workplace safety consultant specializing in predictive analytics for occupational health. Analyze worker health data and provide strategic insights, risk predictions, and actionable recommendations for executives. Pay special attention to team-level risk patterns and identify which teams need immediate intervention. Respond in JSON format:
+{
+  "executiveSummary": "2-3 sentence high-level summary of the organization's MSK health status and key concerns, including team-level risk highlights",
+  "keyInsights": ["4-6 key insights about worker health trends, risk patterns, team-level concerns, and organizational health indicators"],
+  "riskPredictions": ["3-4 predictions about potential future risks, injury likelihood, and health trends based on current data"],
+  "actionableRecommendations": ["4-5 specific, actionable recommendations for improving worker health, reducing risk, and preventing injuries, with team-specific focus where applicable"],
+  "priorityActions": ["3-4 immediate priority actions the company should take based on the highest risk factors, including which teams to prioritize"],
+  "trendAnalysis": "2-3 sentence analysis of readiness trends and health patterns over the period",
+  "organizationalImpact": "2-3 sentence assessment of how current health metrics impact organizational productivity, safety, and costs",
+  "highRiskTeams": ["List of teams with highest risk scores that need immediate attention, with brief explanation of why"],
+  "topWorkersConcern": "Brief summary of the top 10 highest-risk workers and what patterns or concerns they represent"
+}`
+
+  const userPrompt = `As an expert MSK intelligence analyst, analyze this predictive analytics data for an organization:
+
+**Period:** ${params.period.startDate} to ${params.period.endDate}
+
+**Summary:**
+- Total Workers: ${params.summary.totalWorkers}
+- Active Workers: ${params.summary.activeWorkers}
+- At Risk Workers: ${params.summary.atRiskWorkers} (${params.summary.atRiskWorkers > 0 ? ((params.summary.atRiskWorkers / params.summary.activeWorkers) * 100).toFixed(1) : 0}% of active workers)
+- Average Risk Score: ${params.summary.avgRiskScore.toFixed(1)}/100
+
+**Top Risk Teams (Teams with Highest Average Risk Scores):**
+${topRiskTeamsSummary}
+
+**Top 10 Highest Risk Workers:**
+${topRiskWorkersSummary}
+
+**Risk Indicators:**
+${riskIndicatorsSummary}
+
+**Recent Readiness Trends (Last 7 Days):**
+${readinessSummary}
+
+Provide comprehensive analysis, predictions, and strategic recommendations. Pay special attention to:
+1. Which teams have the highest risk and why
+2. Patterns among the top 10 highest-risk workers
+3. Team-level interventions that could be most effective
+4. Immediate actions needed for high-risk teams
+
+Focus on actionable insights that executives can use to make data-driven decisions, with clear team-level priorities.`
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-3.5-turbo', // Cost-effective model
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.4,
+      max_tokens: 1200,
+      response_format: { type: 'json_object' }
+    })
+
+    const content = completion.choices[0]?.message?.content
+    if (!content) {
+      throw new Error('No response from OpenAI')
+    }
+
+    const analysis = JSON.parse(content) as PredictiveAnalyticsAnalysisResult
+
+    // Validate and sanitize response
+    return {
+      executiveSummary: analysis.executiveSummary || 'Analysis completed. Review worker health metrics and risk indicators.',
+      keyInsights: Array.isArray(analysis.keyInsights) 
+        ? analysis.keyInsights.slice(0, 6)
+        : ['Review analytics data for key insights'],
+      riskPredictions: Array.isArray(analysis.riskPredictions)
+        ? analysis.riskPredictions.slice(0, 4)
+        : ['Monitor risk trends', 'Watch for increasing risk indicators', 'Track worker health patterns'],
+      actionableRecommendations: Array.isArray(analysis.actionableRecommendations)
+        ? analysis.actionableRecommendations.slice(0, 5)
+        : ['Review worker health data', 'Implement preventive measures', 'Monitor high-risk workers'],
+      priorityActions: Array.isArray(analysis.priorityActions)
+        ? analysis.priorityActions.slice(0, 4)
+        : ['Address high-risk workers', 'Review risk indicators', 'Implement preventive strategies'],
+      trendAnalysis: analysis.trendAnalysis || 'Review readiness trends for patterns and changes over time.',
+      organizationalImpact: analysis.organizationalImpact || 'Current health metrics impact organizational performance and safety outcomes.',
+      highRiskTeams: Array.isArray(analysis.highRiskTeams)
+        ? analysis.highRiskTeams.slice(0, 5)
+        : ['Review team-level risk data for high-risk teams'],
+      topWorkersConcern: analysis.topWorkersConcern || 'Review top 10 highest-risk workers for patterns and immediate intervention needs.'
+    }
+  } catch (error: any) {
+    console.error('[OpenAI] Predictive analytics analysis error:', error)
+    throw new Error(`Predictive analytics analysis failed: ${error.message || 'Unknown error'}`)
   }
 }
 

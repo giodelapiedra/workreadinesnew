@@ -110,7 +110,40 @@ export async function getPendingIncidentsForTeam(teamId: string) {
     throw new Error(`Failed to fetch pending incidents: ${error.message}`)
   }
 
-  return incidents || []
+  if (!incidents || incidents.length === 0) {
+    return []
+  }
+
+  // For check_in_red_status incidents, fetch check-in data
+  const enrichedIncidents = await Promise.all(
+    incidents.map(async (incident: any) => {
+      if (incident.incident_type === 'check_in_red_status') {
+        // Extract check_in_id from description
+        const checkInIdMatch = incident.description?.match(/Check-In ID: ([a-f0-9-]+)/)
+        const checkInId = checkInIdMatch ? checkInIdMatch[1] : null
+
+        if (checkInId) {
+          // Fetch check-in data
+          const { data: checkIn } = await adminClient
+            .from('daily_checkins')
+            .select('pain_level, fatigue_level, sleep_quality, stress_level, additional_notes, check_in_time')
+            .eq('id', checkInId)
+            .single()
+
+          if (checkIn) {
+            // Add check-in data to incident
+            return {
+              ...incident,
+              checkInData: checkIn,
+            }
+          }
+        }
+      }
+      return incident
+    })
+  )
+
+  return enrichedIncidents
 }
 
 /**
@@ -327,8 +360,8 @@ export async function notifyIncidentApproved(params: {
   notifications.push({
     user_id: params.workerId,
     type: 'incident_approved',
-    title: 'Incident Report Approved',
-    message: `Your incident report has been approved by ${params.teamLeaderName} (Team Leader). An exception has been created and you've been placed on medical leave.`,
+    title: ' Check-In Approved',
+    message: `Your Team Leader ${params.teamLeaderName} has approved your check-in. An exception has been created and your schedules have been deactivated. Please rest and recover.`,
     data: {
       incident_id: params.incidentId,
       exception_id: params.exceptionId,
@@ -394,8 +427,8 @@ export async function notifyIncidentRejected(params: {
   const { data, error } = await adminClient.from('notifications').insert({
     user_id: params.workerId,
     type: 'incident_rejected',
-    title: 'Incident Report Rejected',
-    message: `Your incident report was rejected by ${params.teamLeaderName} (Team Leader). Reason: ${params.rejectionReason}`,
+    title: '❌ Check-In Rejected',
+    message: `Your Team Leader ${params.teamLeaderName} has rejected your check-in request. Reason: ${params.rejectionReason}. You can now submit a new check-in.`,
     data: {
       incident_id: params.incidentId,
       rejection_reason: params.rejectionReason,

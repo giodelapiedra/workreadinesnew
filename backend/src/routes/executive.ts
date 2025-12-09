@@ -11,10 +11,9 @@ import { createUserAccount, CreateUserInput } from '../utils/userCreation.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { supabase } from '../lib/supabase.js'
 import { getExecutiveBusinessInfo } from '../utils/executiveHelpers.js'
-import { getTodayDateString, getStartOfWeekDateString } from '../utils/dateUtils.js'
+import { getTodayDateString, getStartOfWeekDateString, formatDateString } from '../utils/dateTimeUtils.js'
 import { isExceptionActive, getExceptionDatesForScheduledDates } from '../utils/exceptionUtils.js'
 import { formatUserFullName } from '../utils/userUtils.js'
-import { formatDateString } from '../utils/dateTime.js'
 import { 
   getScheduledDatesInRange, 
   findNextScheduledDate 
@@ -1478,6 +1477,683 @@ executive.patch('/users/:id/role', authMiddleware, requireRole(['executive']), a
     return c.json({ success: true, user: updatedUser, message: 'User role updated successfully' }, 200)
   } catch (error: any) {
     console.error('[PATCH /executive/users/:id/role] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Get Predictive Analytics for Workers
+ * Analyzes check-in data (pain, fatigue, sleep, stress) to predict risk and trends
+ * SECURITY: Only returns data for workers under the executive's business
+ */
+executive.get('/predictive-analytics', authMiddleware, requireRole(['executive']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get executive's business information
+    const { data: executiveData, error: executiveError } = await getExecutiveBusinessInfo(user.id)
+
+    if (executiveError || !executiveData) {
+      console.error('[GET /executive/predictive-analytics] Error fetching executive data:', executiveError)
+      return c.json({ error: 'Failed to fetch executive data', details: executiveError || 'Executive business info not found' }, 500)
+    }
+
+    // If executive doesn't have business info, return empty data
+    if (!executiveData.business_name || !executiveData.business_registration_number) {
+      return c.json({
+        success: true,
+        summary: {
+          totalWorkers: 0,
+          activeWorkers: 0,
+          atRiskWorkers: 0,
+          avgRiskScore: 0,
+        },
+        painTrends: [],
+        fatigueTrends: [],
+        sleepTrends: [],
+        stressTrends: [],
+        readinessTrends: [],
+        riskIndicators: [],
+        workerRiskScores: [],
+      })
+    }
+
+    // Get all teams under supervisors with matching business info
+    const { data: supervisors } = await adminClient
+      .from('users')
+      .select('id')
+      .eq('role', 'supervisor')
+      .eq('business_name', executiveData.business_name)
+      .eq('business_registration_number', executiveData.business_registration_number)
+
+    if (!supervisors || supervisors.length === 0) {
+      return c.json({
+        success: true,
+        summary: {
+          totalWorkers: 0,
+          activeWorkers: 0,
+          atRiskWorkers: 0,
+          avgRiskScore: 0,
+        },
+        painTrends: [],
+        fatigueTrends: [],
+        sleepTrends: [],
+        stressTrends: [],
+        readinessTrends: [],
+        riskIndicators: [],
+        workerRiskScores: [],
+      })
+    }
+
+    const supervisorIds = supervisors.map(s => s.id)
+
+    // Get all teams assigned to these supervisors
+    const { data: teams } = await adminClient
+      .from('teams')
+      .select('id')
+      .in('supervisor_id', supervisorIds)
+
+    if (!teams || teams.length === 0) {
+      return c.json({
+        success: true,
+        summary: {
+          totalWorkers: 0,
+          activeWorkers: 0,
+          atRiskWorkers: 0,
+          avgRiskScore: 0,
+        },
+        painTrends: [],
+        fatigueTrends: [],
+        sleepTrends: [],
+        stressTrends: [],
+        readinessTrends: [],
+        riskIndicators: [],
+        workerRiskScores: [],
+      })
+    }
+
+    const teamIds = teams.map(t => t.id)
+
+    // Get all workers from these teams
+    const { data: teamMembers } = await adminClient
+      .from('team_members')
+      .select('user_id')
+      .in('team_id', teamIds)
+
+    if (!teamMembers || teamMembers.length === 0) {
+      return c.json({
+        success: true,
+        summary: {
+          totalWorkers: 0,
+          activeWorkers: 0,
+          atRiskWorkers: 0,
+          avgRiskScore: 0,
+        },
+        painTrends: [],
+        fatigueTrends: [],
+        sleepTrends: [],
+        stressTrends: [],
+        readinessTrends: [],
+        riskIndicators: [],
+        workerRiskScores: [],
+      })
+    }
+
+    const workerIds = Array.from(new Set(teamMembers.map(m => m.user_id)))
+
+    // Get date range from query parameters (default: last 30 days)
+    const queryStartDate = c.req.query('startDate')
+    const queryEndDate = c.req.query('endDate')
+
+    const isValidDateString = (dateStr: string): boolean => {
+      if (!dateStr || typeof dateStr !== 'string') return false
+      const matchesFormat = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+      if (!matchesFormat) return false
+      const date = new Date(dateStr)
+      return !isNaN(date.getTime()) && dateStr === date.toISOString().split('T')[0]
+    }
+
+    const todayStr = getTodayDateString()
+    const defaultStartDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+
+    let startDate = queryStartDate && isValidDateString(queryStartDate) ? queryStartDate : defaultStartDate
+    let endDate = queryEndDate && isValidDateString(queryEndDate) ? queryEndDate : todayStr
+
+    if (startDate > endDate) {
+      return c.json({ error: 'Invalid date range' }, 400)
+    }
+
+    const finalEndDate = endDate > todayStr ? todayStr : endDate
+
+    // Limit to 90 days max
+    const startDateObj = new Date(startDate)
+    const endDateObj = new Date(finalEndDate)
+    const daysDiff = Math.ceil((endDateObj.getTime() - startDateObj.getTime()) / (1000 * 60 * 60 * 24))
+    if (daysDiff > 90) {
+      return c.json({ error: 'Date range cannot exceed 90 days' }, 400)
+    }
+
+    // Get all check-ins for these workers in the date range
+    const { data: checkIns, error: checkInsError } = await adminClient
+      .from('daily_checkins')
+      .select('user_id, check_in_date, pain_level, fatigue_level, sleep_quality, stress_level, predicted_readiness')
+      .in('user_id', workerIds)
+      .gte('check_in_date', startDate)
+      .lte('check_in_date', finalEndDate)
+      .order('check_in_date', { ascending: true })
+
+    if (checkInsError) {
+      console.error('[GET /executive/predictive-analytics] Error fetching check-ins:', checkInsError)
+      return c.json({ error: 'Failed to fetch check-ins', details: checkInsError.message }, 500)
+    }
+
+    // Get worker details
+    const { data: workers, error: workersError } = await adminClient
+      .from('users')
+      .select('id, email, first_name, last_name, full_name')
+      .eq('role', 'worker')
+      .in('id', workerIds)
+
+    if (workersError) {
+      console.error('[GET /executive/predictive-analytics] Error fetching workers:', workersError)
+      return c.json({ error: 'Failed to fetch workers', details: workersError.message }, 500)
+    }
+
+    const workerMap = new Map((workers || []).map(w => [w.id, w]))
+
+    // Get team information for workers
+    const { data: teamMembersWithTeams } = await adminClient
+      .from('team_members')
+      .select('user_id, team_id')
+      .in('user_id', workerIds)
+      .in('team_id', teamIds)
+
+    // Get team details
+    const { data: teamsData } = await adminClient
+      .from('teams')
+      .select('id, name, site_location')
+      .in('id', teamIds)
+
+    // Create maps for quick lookup
+    const teamMap = new Map(teamsData?.map((t: any) => [t.id, t]) || [])
+    const workerTeamMap = new Map(teamMembersWithTeams?.map((tm: any) => [tm.user_id, tm.team_id]) || [])
+
+    // Process data for trends
+    const trendsMap = new Map<string, {
+      date: string
+      pain: number[]
+      fatigue: number[]
+      sleep: number[]
+      stress: number[]
+      readiness: { green: number; amber: number; red: number }
+    }>()
+
+    // Group by date
+    ;(checkIns || []).forEach((checkIn: any) => {
+      const date = checkIn.check_in_date
+      if (!trendsMap.has(date)) {
+        trendsMap.set(date, {
+          date,
+          pain: [],
+          fatigue: [],
+          sleep: [],
+          stress: [],
+          readiness: { green: 0, amber: 0, red: 0 },
+        })
+      }
+      const dayData = trendsMap.get(date)!
+      dayData.pain.push(checkIn.pain_level || 0)
+      dayData.fatigue.push(checkIn.fatigue_level || 0)
+      dayData.sleep.push(checkIn.sleep_quality || 0)
+      dayData.stress.push(checkIn.stress_level || 0)
+      
+      const readiness = checkIn.predicted_readiness
+      if (readiness === 'Green') dayData.readiness.green++
+      else if (readiness === 'Yellow' || readiness === 'Amber') dayData.readiness.amber++
+      else if (readiness === 'Red') dayData.readiness.red++
+    })
+
+    // Calculate daily averages
+    const painTrends = Array.from(trendsMap.values()).map(d => ({
+      date: d.date,
+      avg: d.pain.length > 0 ? d.pain.reduce((a, b) => a + b, 0) / d.pain.length : 0,
+      max: d.pain.length > 0 ? Math.max(...d.pain) : 0,
+      min: d.pain.length > 0 ? Math.min(...d.pain) : 0,
+    }))
+
+    const fatigueTrends = Array.from(trendsMap.values()).map(d => ({
+      date: d.date,
+      avg: d.fatigue.length > 0 ? d.fatigue.reduce((a, b) => a + b, 0) / d.fatigue.length : 0,
+      max: d.fatigue.length > 0 ? Math.max(...d.fatigue) : 0,
+      min: d.fatigue.length > 0 ? Math.min(...d.fatigue) : 0,
+    }))
+
+    const sleepTrends = Array.from(trendsMap.values()).map(d => ({
+      date: d.date,
+      avg: d.sleep.length > 0 ? d.sleep.reduce((a, b) => a + b, 0) / d.sleep.length : 0,
+      max: d.sleep.length > 0 ? Math.max(...d.sleep) : 0,
+      min: d.sleep.length > 0 ? Math.min(...d.sleep) : 0,
+    }))
+
+    const stressTrends = Array.from(trendsMap.values()).map(d => ({
+      date: d.date,
+      avg: d.stress.length > 0 ? d.stress.reduce((a, b) => a + b, 0) / d.stress.length : 0,
+      max: d.stress.length > 0 ? Math.max(...d.stress) : 0,
+      min: d.stress.length > 0 ? Math.min(...d.stress) : 0,
+    }))
+
+    const readinessTrends = Array.from(trendsMap.values()).map(d => ({
+      date: d.date,
+      green: d.readiness.green,
+      amber: d.readiness.amber,
+      red: d.readiness.red,
+      total: d.readiness.green + d.readiness.amber + d.readiness.red,
+    }))
+
+    // Calculate risk scores per worker
+    const workerCheckInsMap = new Map<string, any[]>()
+    ;(checkIns || []).forEach((checkIn: any) => {
+      if (!workerCheckInsMap.has(checkIn.user_id)) {
+        workerCheckInsMap.set(checkIn.user_id, [])
+      }
+      workerCheckInsMap.get(checkIn.user_id)!.push(checkIn)
+    })
+
+    const workerRiskScores = Array.from(workerCheckInsMap.entries()).map(([workerId, workerCheckIns]) => {
+      const worker = workerMap.get(workerId)
+      if (!worker) return null
+
+      // Calculate risk score (0-100, higher = more risk)
+      // Factors: high pain, high fatigue, low sleep, high stress, red readiness
+      let riskScore = 0
+      let totalWeight = 0
+
+      workerCheckIns.forEach(ci => {
+        const painWeight = (ci.pain_level || 0) * 2 // 0-20 points
+        const fatigueWeight = (ci.fatigue_level || 0) * 1.5 // 0-15 points
+        const sleepWeight = (12 - (ci.sleep_quality || 0)) * 1.5 // 0-18 points (less sleep = more risk)
+        const stressWeight = (ci.stress_level || 0) * 2 // 0-20 points
+        const readinessWeight = ci.predicted_readiness === 'Red' ? 20 : (ci.predicted_readiness === 'Yellow' || ci.predicted_readiness === 'Amber' ? 10 : 0) // 0-20 points
+
+        riskScore += painWeight + fatigueWeight + sleepWeight + stressWeight + readinessWeight
+        totalWeight += 87 // Max possible weight per check-in
+      })
+
+      const avgRiskScore = totalWeight > 0 ? (riskScore / totalWeight) * 100 : 0
+
+      // Count red check-ins
+      const redCount = workerCheckIns.filter(ci => ci.predicted_readiness === 'Red').length
+      const totalCheckIns = workerCheckIns.length
+      const redPercentage = totalCheckIns > 0 ? (redCount / totalCheckIns) * 100 : 0
+
+      // Calculate trend (comparing last 7 days vs previous 7 days)
+      const sortedCheckIns = [...workerCheckIns].sort((a, b) => a.check_in_date.localeCompare(b.check_in_date))
+      const recentCheckIns = sortedCheckIns.slice(-7)
+      const previousCheckIns = sortedCheckIns.slice(-14, -7)
+
+      const recentAvgPain = recentCheckIns.length > 0
+        ? recentCheckIns.reduce((sum, ci) => sum + (ci.pain_level || 0), 0) / recentCheckIns.length
+        : 0
+      const previousAvgPain = previousCheckIns.length > 0
+        ? previousCheckIns.reduce((sum, ci) => sum + (ci.pain_level || 0), 0) / previousCheckIns.length
+        : 0
+
+      // Only calculate trend if we have both recent and previous data
+      // Return null if insufficient data (will be displayed as "N/A" in frontend)
+      const painTrend = (previousCheckIns.length > 0 && previousAvgPain > 0) 
+        ? ((recentAvgPain - previousAvgPain) / previousAvgPain) * 100 
+        : null
+
+      const teamId = workerTeamMap.get(workerId)
+      const team = teamId ? teamMap.get(teamId) : null
+
+      return {
+        workerId,
+        workerName: formatUserFullName(worker),
+        workerEmail: worker.email,
+        teamId: teamId || null,
+        teamName: team?.name || null,
+        siteLocation: team?.site_location || null,
+        riskScore: Math.round(avgRiskScore * 10) / 10,
+        redCheckIns: redCount,
+        totalCheckIns,
+        redPercentage: Math.round(redPercentage * 10) / 10,
+        painTrend: painTrend !== null ? Math.round(painTrend * 10) / 10 : null,
+        avgPain: recentCheckIns.length > 0
+          ? Math.round((recentCheckIns.reduce((sum, ci) => sum + (ci.pain_level || 0), 0) / recentCheckIns.length) * 10) / 10
+          : 0,
+        avgFatigue: recentCheckIns.length > 0
+          ? Math.round((recentCheckIns.reduce((sum, ci) => sum + (ci.fatigue_level || 0), 0) / recentCheckIns.length) * 10) / 10
+          : 0,
+        avgSleep: recentCheckIns.length > 0
+          ? Math.round((recentCheckIns.reduce((sum, ci) => sum + (ci.sleep_quality || 0), 0) / recentCheckIns.length) * 10) / 10
+          : 0,
+        avgStress: recentCheckIns.length > 0
+          ? Math.round((recentCheckIns.reduce((sum, ci) => sum + (ci.stress_level || 0), 0) / recentCheckIns.length) * 10) / 10
+          : 0,
+      }
+    }).filter(Boolean).sort((a, b) => (b?.riskScore || 0) - (a?.riskScore || 0))
+
+    // Calculate summary
+    const totalWorkers = workerIds.length
+    const activeWorkers = workerRiskScores.length
+    const atRiskWorkers = workerRiskScores.filter(w => (w?.riskScore || 0) >= 50).length
+    const avgRiskScore = workerRiskScores.length > 0
+      ? workerRiskScores.reduce((sum, w) => sum + (w?.riskScore || 0), 0) / workerRiskScores.length
+      : 0
+
+    // Risk indicators
+    const riskIndicators = [
+      {
+        type: 'high_pain',
+        label: 'High Pain Levels',
+        count: workerRiskScores.filter(w => (w?.avgPain || 0) >= 7).length,
+        severity: 'high' as const,
+      },
+      {
+        type: 'high_fatigue',
+        label: 'High Fatigue',
+        count: workerRiskScores.filter(w => (w?.avgFatigue || 0) >= 7).length,
+        severity: 'medium' as const,
+      },
+      {
+        type: 'poor_sleep',
+        label: 'Poor Sleep Quality',
+        count: workerRiskScores.filter(w => (w?.avgSleep || 0) < 6).length,
+        severity: 'medium' as const,
+      },
+      {
+        type: 'high_stress',
+        label: 'High Stress',
+        count: workerRiskScores.filter(w => (w?.avgStress || 0) >= 7).length,
+        severity: 'high' as const,
+      },
+      {
+        type: 'frequent_red',
+        label: 'Frequent Red Check-ins',
+        count: workerRiskScores.filter(w => (w?.redPercentage || 0) >= 20).length,
+        severity: 'critical' as const,
+      },
+    ]
+
+    return c.json({
+      success: true,
+      summary: {
+        totalWorkers,
+        activeWorkers,
+        atRiskWorkers,
+        avgRiskScore: Math.round(avgRiskScore * 10) / 10,
+      },
+      painTrends,
+      fatigueTrends,
+      sleepTrends,
+      stressTrends,
+      readinessTrends,
+      riskIndicators,
+      workerRiskScores,
+      period: {
+        startDate,
+        endDate: finalEndDate,
+      },
+    })
+  } catch (error: any) {
+    console.error('[GET /executive/predictive-analytics] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Get AI Analysis for Predictive Analytics
+ * Uses OpenAI to generate comprehensive insights and recommendations
+ * SECURITY: Only analyzes data for workers under the executive's business
+ */
+executive.post('/predictive-analytics/ai-analysis', authMiddleware, requireRole(['executive']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const { analyticsData } = await c.req.json()
+
+    // SECURITY: Validate analytics data structure
+    if (!analyticsData || typeof analyticsData !== 'object') {
+      return c.json({ error: 'Invalid analytics data' }, 400)
+    }
+
+    // Validate required fields
+    if (!analyticsData.summary || !analyticsData.riskIndicators || !analyticsData.workerRiskScores) {
+      return c.json({ error: 'Incomplete analytics data' }, 400)
+    }
+
+    // Import AI analysis function
+    const { analyzePredictiveAnalytics } = await import('../utils/openai.js')
+
+    // Prepare top risk workers (limit to top 10 for AI analysis)
+    const topRiskWorkers = (analyticsData.workerRiskScores || []).slice(0, 10).map((w: any) => ({
+      workerName: w.workerName || 'Unknown',
+      teamName: w.teamName || 'Unassigned',
+      siteLocation: w.siteLocation || null,
+      riskScore: w.riskScore || 0,
+      redPercentage: w.redPercentage || 0,
+      avgPain: w.avgPain || 0,
+      avgFatigue: w.avgFatigue || 0,
+      avgSleep: w.avgSleep || 0,
+      avgStress: w.avgStress || 0,
+    }))
+
+    // Prepare top risk teams (limit to top 5 for AI analysis)
+    const topRiskTeams = (analyticsData.teamRiskScores || []).slice(0, 5).map((t: any) => ({
+      teamName: t.teamName || 'Unknown',
+      siteLocation: t.siteLocation || null,
+      avgRiskScore: t.avgRiskScore || 0,
+      workerCount: t.workerCount || 0,
+      atRiskWorkers: t.atRiskWorkers || 0,
+      highRiskWorkers: t.highRiskWorkers || 0,
+    }))
+
+    // Prepare data for AI analysis
+    const analysisData = {
+      summary: analyticsData.summary,
+      riskIndicators: analyticsData.riskIndicators || [],
+      topRiskWorkers,
+      topRiskTeams,
+      readinessTrends: analyticsData.readinessTrends || [],
+      period: analyticsData.period || { startDate: '', endDate: '' },
+    }
+
+    // Generate AI analysis
+    const analysis = await analyzePredictiveAnalytics(analysisData)
+
+    return c.json({
+      success: true,
+      analysis,
+      generatedAt: new Date().toISOString(),
+    })
+  } catch (error: any) {
+    console.error('[POST /executive/predictive-analytics/ai-analysis] Error:', error)
+    return c.json({ 
+      error: 'AI analysis failed', 
+      details: error.message || 'Unknown error' 
+    }, 500)
+  }
+})
+
+/**
+ * Save AI Analysis Report
+ * Saves a generated AI analysis report for future reference
+ * SECURITY: Only executives can save their own reports
+ */
+executive.post('/ai-analysis-reports', authMiddleware, requireRole(['executive']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const { reportTitle, periodStartDate, periodEndDate, summary, analysis, analyticsSnapshot } = await c.req.json()
+
+    // Validate required fields
+    if (!reportTitle || !periodStartDate || !periodEndDate || !summary || !analysis) {
+      return c.json({ error: 'Missing required fields' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Insert report
+    const { data: report, error: insertError } = await adminClient
+      .from('ai_analysis_reports')
+      .insert({
+        executive_id: user.id,
+        report_title: reportTitle,
+        report_type: 'predictive_analytics',
+        period_start_date: periodStartDate,
+        period_end_date: periodEndDate,
+        summary,
+        analysis,
+        analytics_snapshot: analyticsSnapshot || null,
+      })
+      .select()
+      .single()
+
+    if (insertError) {
+      console.error('[POST /executive/ai-analysis-reports] Error:', insertError)
+      return c.json({ error: 'Failed to save report', details: insertError.message }, 500)
+    }
+
+    return c.json({
+      success: true,
+      report,
+    })
+  } catch (error: any) {
+    console.error('[POST /executive/ai-analysis-reports] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Get All AI Analysis Reports
+ * Retrieves all saved reports for the executive
+ * SECURITY: Only returns reports for the authenticated executive
+ */
+executive.get('/ai-analysis-reports', authMiddleware, requireRole(['executive']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get all reports for this executive
+    const { data: reports, error: fetchError } = await adminClient
+      .from('ai_analysis_reports')
+      .select('id, report_title, report_type, period_start_date, period_end_date, summary, created_at')
+      .eq('executive_id', user.id)
+      .order('created_at', { ascending: false })
+
+    if (fetchError) {
+      console.error('[GET /executive/ai-analysis-reports] Error:', fetchError)
+      return c.json({ error: 'Failed to fetch reports', details: fetchError.message }, 500)
+    }
+
+    return c.json({
+      success: true,
+      reports: reports || [],
+    })
+  } catch (error: any) {
+    console.error('[GET /executive/ai-analysis-reports] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Get Single AI Analysis Report
+ * Retrieves a specific report by ID
+ * SECURITY: Only returns report if it belongs to the authenticated executive
+ */
+executive.get('/ai-analysis-reports/:id', authMiddleware, requireRole(['executive']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const reportId = c.req.param('id')
+    if (!reportId) {
+      return c.json({ error: 'Report ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Get report
+    const { data: report, error: fetchError } = await adminClient
+      .from('ai_analysis_reports')
+      .select('*')
+      .eq('id', reportId)
+      .eq('executive_id', user.id)
+      .single()
+
+    if (fetchError) {
+      if (fetchError.code === 'PGRST116') {
+        return c.json({ error: 'Report not found' }, 404)
+      }
+      console.error('[GET /executive/ai-analysis-reports/:id] Error:', fetchError)
+      return c.json({ error: 'Failed to fetch report', details: fetchError.message }, 500)
+    }
+
+    return c.json({
+      success: true,
+      report,
+    })
+  } catch (error: any) {
+    console.error('[GET /executive/ai-analysis-reports/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+/**
+ * Delete AI Analysis Report
+ * Deletes a specific report by ID
+ * SECURITY: Only allows deletion if report belongs to the authenticated executive
+ */
+executive.delete('/ai-analysis-reports/:id', authMiddleware, requireRole(['executive']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const reportId = c.req.param('id')
+    if (!reportId) {
+      return c.json({ error: 'Report ID is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Delete report
+    const { error: deleteError } = await adminClient
+      .from('ai_analysis_reports')
+      .delete()
+      .eq('id', reportId)
+      .eq('executive_id', user.id)
+
+    if (deleteError) {
+      console.error('[DELETE /executive/ai-analysis-reports/:id] Error:', deleteError)
+      return c.json({ error: 'Failed to delete report', details: deleteError.message }, 500)
+    }
+
+    return c.json({
+      success: true,
+      message: 'Report deleted successfully',
+    })
+  } catch (error: any) {
+    console.error('[DELETE /executive/ai-analysis-reports/:id] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
   }
 })

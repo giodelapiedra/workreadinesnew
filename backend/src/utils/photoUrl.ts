@@ -18,19 +18,22 @@ export function getIncidentPhotoProxyUrl(r2Url: string | null, incidentId: strin
     return null
   }
   
+  // Normalize URL - trim whitespace
+  const normalizedUrl = r2Url.trim()
+  
   // If it's already a proxy URL, return as-is
-  if (r2Url.includes('/incident-photo/')) {
-    return r2Url
+  if (normalizedUrl.includes('/incident-photo/')) {
+    return normalizedUrl
   }
   
-  // If it's an R2 URL, convert to proxy URL
+  // If it's an R2 URL (with or without protocol), convert to proxy URL
   // This avoids DNS resolution issues with R2 public URLs
-  if (r2Url.includes('.r2.dev') || r2Url.includes('r2.cloudflarestorage.com')) {
+  if (normalizedUrl.includes('.r2.dev') || normalizedUrl.includes('r2.cloudflarestorage.com')) {
     return `/api/${rolePrefix}/incident-photo/${incidentId}`
   }
   
   // For other URLs, return as-is
-  return r2Url
+  return normalizedUrl
 }
 
 /**
@@ -44,18 +47,25 @@ export function extractR2FilePath(r2Url: string): string | null {
     return null
   }
   
+  // Normalize URL - add protocol if missing
+  let normalizedUrl = r2Url.trim()
+  if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
+    normalizedUrl = `https://${normalizedUrl}`
+  }
+  
   // Format: https://pub-xxx.r2.dev/incidents/userId/filename.jpg
   // Or: https://bucket.accountId.r2.dev/incidents/userId/filename.jpg
-  if (r2Url.includes('.r2.dev/')) {
-    const urlParts = r2Url.split('.r2.dev/')
+  // Or: pub-xxx.r2.dev/incidents/userId/filename.jpg (without protocol)
+  if (normalizedUrl.includes('.r2.dev/')) {
+    const urlParts = normalizedUrl.split('.r2.dev/')
     if (urlParts.length > 1) {
       return urlParts[1]
     }
   }
   
   // Format: https://account.r2.cloudflarestorage.com/bucket/incidents/userId/filename.jpg
-  if (r2Url.includes('r2.cloudflarestorage.com')) {
-    const urlParts = r2Url.split('r2.cloudflarestorage.com/')
+  if (normalizedUrl.includes('r2.cloudflarestorage.com')) {
+    const urlParts = normalizedUrl.split('r2.cloudflarestorage.com/')
     if (urlParts.length > 1) {
       // Remove bucket name from path
       const pathWithBucket = urlParts[1]

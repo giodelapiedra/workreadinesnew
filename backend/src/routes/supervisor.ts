@@ -7,12 +7,11 @@ import { parseIncidentNotes, extractReturnToWorkData } from '../utils/notesParse
 import { getAdminClient } from '../utils/adminClient.js'
 import { isValidEmail } from '../middleware/security.js'
 // Import optimized utility functions
-import { getTodayDateString, getTodayDate, getStartOfWeekDateString, getFirstDayOfMonthString, dateToDateString } from '../utils/dateUtils.js'
+import { getTodayDateString, getTodayDate, getStartOfWeekDateString, getFirstDayOfMonthString, dateToDateString, calculateAge, MINIMUM_AGE } from '../utils/dateTimeUtils.js'
 import { validateTeamId, validatePassword, validateStringInput, validateEmail } from '../utils/validationUtils.js'
 import { isExceptionActive, getWorkersWithActiveExceptions } from '../utils/exceptionUtils.js'
 import { formatTeamLeader, formatUserFullName, getUserInitials } from '../utils/userUtils.js'
 import { encodeCursor, decodeCursor, extractCursorDate } from '../utils/cursorPagination.js'
-import { calculateAge, MINIMUM_AGE } from '../utils/ageUtils.js'
 
 const supervisor = new Hono<{ Variables: AuthVariables }>()
 
@@ -404,7 +403,6 @@ supervisor.post('/team-leaders', authMiddleware, requireRole(['supervisor']), as
       }
 
       // Validate minimum age (18 years old)
-      const { calculateAge, MINIMUM_AGE } = await import('../utils/ageUtils.js')
       const age = calculateAge(date_of_birth)
       if (age === null || age < MINIMUM_AGE) {
         return c.json({ error: `Age must be at least ${MINIMUM_AGE} years old. Current age: ${age} years old` }, 400)
