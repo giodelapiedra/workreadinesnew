@@ -297,10 +297,10 @@ async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
 
   // NO FALLBACK: If no individual worker schedule exists, return no schedule
   // Team Leader MUST assign individual schedules via worker_schedules table
+  // Don't return checkInWindow when there's no schedule - frontend will handle this
   return {
     hasShift: false,
     shiftType: 'flexible',
-    checkInWindow: getCheckInWindow('flexible'),
     scheduleSource: 'none' as const, // No schedule assigned
   }
 }
@@ -833,7 +833,6 @@ checkins.get('/dashboard', authMiddleware, requireRole(['worker']), async (c) =>
     const nextShift = nextShiftData || {
       hasShift: false,
       shiftType: 'flexible' as const,
-      checkInWindow: getCheckInWindow('flexible'),
       scheduleSource: 'none' as const,
       date: null,
       dayName: null,
@@ -888,7 +887,6 @@ checkins.get('/next-shift-info', authMiddleware, requireRole(['worker']), async 
     return c.json({
       hasShift: false,
       shiftType: 'flexible',
-      checkInWindow: getCheckInWindow('flexible'),
       scheduleSource: 'none',
       date: null,
       dayName: null,
