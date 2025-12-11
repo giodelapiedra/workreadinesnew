@@ -1187,6 +1187,72 @@ worker.get('/streak', authMiddleware, requireRole(['worker']), async (c) => {
 
 // Get incident photo (proxy endpoint to serve R2 images)
 // This avoids DNS resolution issues with R2 public URLs
+// Get worker's certificates
+worker.get('/certificates', authMiddleware, requireRole(['worker']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const adminClient = getAdminClient()
+    const caseId = c.req.query('case_id') // Optional filter by case
+
+    let query = adminClient
+      .from('generated_certificates')
+      .select(`
+        *,
+        worker:users!generated_certificates_worker_id_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        ),
+        generated_by_user:users!generated_certificates_generated_by_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        ),
+        template:certificate_templates!generated_certificates_template_id_fkey(
+          id,
+          name,
+          template_type
+        )
+      `)
+      .eq('worker_id', user.id)
+      .eq('is_voided', false)
+
+    // Filter by case_id if provided
+    if (caseId) {
+      query = query.eq('case_id', caseId)
+    }
+
+    const { data: certificates, error } = await query.order('generated_at', { ascending: false })
+
+    if (error) {
+      console.error('[GET /worker/certificates] Error:', error)
+      return c.json({ error: 'Failed to fetch certificates', details: error.message }, 500)
+    }
+
+    // Transform certificates to include template_name and worker_name
+    const transformedCertificates = (certificates || []).map((cert: any) => ({
+      ...cert,
+      template_name: cert.template?.name || 'Unknown Template',
+      worker_name: cert.worker?.full_name || 
+                   `${cert.worker?.first_name || ''} ${cert.worker?.last_name || ''}`.trim() || 
+                   cert.worker?.email || 'Unknown Worker',
+    }))
+
+    return c.json({ certificates: transformedCertificates })
+  } catch (error: any) {
+    console.error('[GET /worker/certificates] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
 worker.get('/incident-photo/:incidentId', async (c) => {
   try {
     const incidentId = c.req.param('incidentId')

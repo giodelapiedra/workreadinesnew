@@ -102,3 +102,38 @@ export function getContentTypeFromFilePath(filePath: string): string {
   return contentTypeMap[extension || ''] || 'image/jpeg'
 }
 
+/**
+ * Convert R2 storage URL to backend proxy URL for certificate images
+ * 
+ * @param r2Url - Direct R2 URL (e.g., https://pub-xxx.r2.dev/certificates/userId/imageId.png)
+ * @returns Proxy URL that will be served through backend
+ */
+export function getCertificateImageProxyUrl(r2Url: string | null): string | null {
+  if (!r2Url) {
+    return null
+  }
+  
+  // Normalize URL - trim whitespace
+  const normalizedUrl = r2Url.trim()
+  
+  // If it's already a proxy URL, return as-is
+  if (normalizedUrl.includes('/certificate-image/')) {
+    return normalizedUrl
+  }
+  
+  // If it's an R2 URL, convert to proxy URL
+  if (normalizedUrl.includes('.r2.dev') || normalizedUrl.includes('r2.cloudflarestorage.com')) {
+    // Extract the path after 'certificates/'
+    // Format: https://pub-xxx.r2.dev/certificates/userId/imageId.png
+    const match = normalizedUrl.match(/certificates\/([^\/]+)\/([^\/]+)/)
+    if (match) {
+      const userId = match[1]
+      const imageId = match[2]
+      return `/api/whs/certificate-image/${userId}/${imageId}`
+    }
+  }
+  
+  // For other URLs, return as-is
+  return normalizedUrl
+}
+

@@ -5,7 +5,7 @@ import { parseIncidentNotes } from '../utils/notesParser.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { normalizeDate, isDateInRange, calculateAge } from '../utils/dateTimeUtils.js'
 import { formatUserFullName } from '../utils/userUtils.js'
-import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath } from '../utils/photoUrl.js'
+import { getIncidentPhotoProxyUrl, extractR2FilePath, getContentTypeFromFilePath, getCertificateImageProxyUrl } from '../utils/photoUrl.js'
 import { getFromR2 } from '../utils/r2Storage.js'
 import { encodeCursor, decodeCursor, extractCursorDate } from '../utils/cursorPagination.js'
 
@@ -1850,6 +1850,821 @@ whs.get('/incident-photo/:incidentId', authMiddleware, requireRole(['whs_control
   } catch (error: any) {
     console.error('[GET /whs/incident-photo/:incidentId] Error:', error)
     return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// ============================================
+// Certificate Image Proxy Endpoint
+// ============================================
+
+// Proxy endpoint for certificate images (similar to incident photos)
+// This endpoint serves images from R2 storage to avoid DNS resolution issues
+whs.get('/certificate-image/:userId/:imageId', async (c) => {
+  try {
+    const userId = c.req.param('userId')
+    const imageId = c.req.param('imageId')
+    
+    if (!userId || !imageId) {
+      return c.json({ error: 'User ID and Image ID are required' }, 400)
+    }
+
+    // Construct the R2 file path
+    const filePath = `certificates/${userId}/${imageId}`
+    console.log('[GET /whs/certificate-image] Fetching:', filePath)
+
+    // Fetch image from R2
+    try {
+      const imageBuffer = await getFromR2(filePath)
+      
+      // Determine content type from file extension
+      const contentType = getContentTypeFromFilePath(filePath)
+
+      // Set appropriate headers
+      c.header('Content-Type', contentType)
+      c.header('Cache-Control', 'public, max-age=31536000, immutable') // Cache for 1 year
+      c.header('Content-Disposition', `inline; filename="${imageId}"`)
+      
+      return c.body(imageBuffer as any)
+    } catch (r2Error: any) {
+      console.error(`[GET /whs/certificate-image] Error fetching from R2:`, r2Error)
+      return c.json({ error: 'Image not found in storage' }, 404)
+    }
+  } catch (error: any) {
+    console.error('[GET /whs/certificate-image] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// ============================================
+// Certificate Management Endpoints
+// ============================================
+
+// Get all certificate templates
+whs.get('/certificate-templates', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const adminClient = getAdminClient()
+    const templateType = c.req.query('type') // Optional filter by type
+
+    let query = adminClient
+      .from('certificate_templates')
+      .select('*')
+      .eq('is_active', true)
+      .order('created_at', { ascending: false })
+
+    if (templateType) {
+      query = query.eq('template_type', templateType)
+    }
+
+    const { data: templates, error } = await query
+
+    if (error) {
+      console.error('[GET /whs/certificate-templates] Error:', error)
+      return c.json({ error: 'Failed to fetch templates', details: error.message }, 500)
+    }
+
+    // Convert image URLs to proxy URLs
+    const templatesWithProxyUrls = (templates || []).map((template: any) => {
+      const getProxyUrl = (url: string | null) => {
+        if (!url) return null
+        return getCertificateImageProxyUrl(url) || url
+      }
+
+      return {
+        ...template,
+        background_image_url: getProxyUrl(template.background_image_url),
+        logo_url: getProxyUrl(template.logo_url),
+        header_image_url: getProxyUrl(template.header_image_url),
+        footer_image_url: getProxyUrl(template.footer_image_url),
+        signature_image_url: getProxyUrl(template.signature_image_url),
+      }
+    })
+
+    return c.json({ templates: templatesWithProxyUrls })
+  } catch (error: any) {
+    console.error('[GET /whs/certificate-templates] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get single certificate template
+whs.get('/certificate-templates/:id', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const templateId = c.req.param('id')
+    const adminClient = getAdminClient()
+
+    const { data: template, error } = await adminClient
+      .from('certificate_templates')
+      .select('*')
+      .eq('id', templateId)
+      .single()
+
+    if (error || !template) {
+      return c.json({ error: 'Template not found' }, 404)
+    }
+
+    // Convert image URLs to proxy URLs
+    const getProxyUrl = (url: string | null) => {
+      if (!url) return null
+      return getCertificateImageProxyUrl(url) || url
+    }
+
+    const templateWithProxyUrls = {
+      ...template,
+      background_image_url: getProxyUrl(template.background_image_url),
+      logo_url: getProxyUrl(template.logo_url),
+      header_image_url: getProxyUrl(template.header_image_url),
+      footer_image_url: getProxyUrl(template.footer_image_url),
+      signature_image_url: getProxyUrl(template.signature_image_url),
+    }
+
+    return c.json({ template: templateWithProxyUrls })
+  } catch (error: any) {
+    console.error('[GET /whs/certificate-templates/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Create certificate template
+whs.post('/certificate-templates', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const body = await c.req.json()
+    const { 
+      name, 
+      description, 
+      template_type, 
+      html_content, 
+      placeholders, 
+      styles, 
+      page_size, 
+      orientation, 
+      is_default,
+      // Image template fields
+      use_background_mode,
+      background_image_url,
+      text_positions,
+      logo_url,
+      logo_position,
+      header_image_url,
+      footer_image_url,
+      signature_image_url,
+      signature_position
+    } = body
+
+    // Validate based on template mode
+    if (use_background_mode) {
+      if (!name || !template_type || !background_image_url) {
+        return c.json({ error: 'Missing required fields: name, template_type, background_image_url' }, 400)
+      }
+    } else {
+      if (!name || !template_type || !html_content) {
+        return c.json({ error: 'Missing required fields: name, template_type, html_content' }, 400)
+      }
+    }
+
+    const adminClient = getAdminClient()
+
+    // If setting as default, unset other defaults of same type
+    if (is_default) {
+      await adminClient
+        .from('certificate_templates')
+        .update({ is_default: false })
+        .eq('template_type', template_type)
+    }
+
+    const insertData: any = {
+      name,
+      description,
+      template_type,
+      html_content: html_content || '',
+      placeholders: placeholders || [],
+      styles: styles || {},
+      page_size: page_size || 'A4',
+      orientation: orientation || 'portrait',
+      is_default: is_default || false,
+      created_by: user.id,
+      // Image template fields
+      use_background_mode: use_background_mode || false,
+    }
+
+    // Add image fields if provided
+    if (background_image_url) insertData.background_image_url = background_image_url
+    if (text_positions) insertData.text_positions = text_positions
+    if (logo_url) insertData.logo_url = logo_url
+    if (logo_position) insertData.logo_position = logo_position
+    if (header_image_url) insertData.header_image_url = header_image_url
+    if (footer_image_url) insertData.footer_image_url = footer_image_url
+    if (signature_image_url) insertData.signature_image_url = signature_image_url
+    if (signature_position) insertData.signature_position = signature_position
+
+    const { data: template, error } = await adminClient
+      .from('certificate_templates')
+      .insert(insertData)
+      .select()
+      .single()
+
+    if (error) {
+      console.error('[POST /whs/certificate-templates] Error:', error)
+      return c.json({ error: 'Failed to create template', details: error.message }, 500)
+    }
+
+    return c.json({ template }, 201)
+  } catch (error: any) {
+    console.error('[POST /whs/certificate-templates] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Update certificate template
+whs.put('/certificate-templates/:id', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const templateId = c.req.param('id')
+    const body = await c.req.json()
+    const { 
+      name, 
+      description, 
+      html_content, 
+      placeholders, 
+      styles, 
+      page_size, 
+      orientation, 
+      is_default, 
+      is_active,
+      // Image template fields
+      use_background_mode,
+      background_image_url,
+      text_positions,
+      logo_url,
+      logo_position,
+      header_image_url,
+      footer_image_url,
+      signature_image_url,
+      signature_position
+    } = body
+
+    const adminClient = getAdminClient()
+
+    // Verify template exists
+    const { data: existing, error: fetchError } = await adminClient
+      .from('certificate_templates')
+      .select('*')
+      .eq('id', templateId)
+      .single()
+
+    if (fetchError || !existing) {
+      return c.json({ error: 'Template not found' }, 404)
+    }
+
+    // If setting as default, unset other defaults of same type
+    if (is_default && existing.template_type) {
+      await adminClient
+        .from('certificate_templates')
+        .update({ is_default: false })
+        .eq('template_type', existing.template_type)
+        .neq('id', templateId)
+    }
+
+    const updateData: any = {}
+    if (name !== undefined) updateData.name = name
+    if (description !== undefined) updateData.description = description
+    if (html_content !== undefined) updateData.html_content = html_content
+    if (placeholders !== undefined) updateData.placeholders = placeholders
+    if (styles !== undefined) updateData.styles = styles
+    if (page_size !== undefined) updateData.page_size = page_size
+    if (orientation !== undefined) updateData.orientation = orientation
+    if (is_default !== undefined) updateData.is_default = is_default
+    if (is_active !== undefined) updateData.is_active = is_active
+    // Image template fields
+    if (use_background_mode !== undefined) updateData.use_background_mode = use_background_mode
+    if (background_image_url !== undefined) updateData.background_image_url = background_image_url
+    if (text_positions !== undefined) updateData.text_positions = text_positions
+    if (logo_url !== undefined) updateData.logo_url = logo_url
+    if (logo_position !== undefined) updateData.logo_position = logo_position
+    if (header_image_url !== undefined) updateData.header_image_url = header_image_url
+    if (footer_image_url !== undefined) updateData.footer_image_url = footer_image_url
+    if (signature_image_url !== undefined) updateData.signature_image_url = signature_image_url
+    if (signature_position !== undefined) updateData.signature_position = signature_position
+
+    const { data: template, error } = await adminClient
+      .from('certificate_templates')
+      .update(updateData)
+      .eq('id', templateId)
+      .select()
+      .single()
+
+    if (error) {
+      console.error('[PUT /whs/certificate-templates/:id] Error:', error)
+      return c.json({ error: 'Failed to update template', details: error.message }, 500)
+    }
+
+    return c.json({ template })
+  } catch (error: any) {
+    console.error('[PUT /whs/certificate-templates/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Delete certificate template
+whs.delete('/certificate-templates/:id', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const templateId = c.req.param('id')
+    const adminClient = getAdminClient()
+
+    // Soft delete - just mark as inactive
+    const { error } = await adminClient
+      .from('certificate_templates')
+      .update({ is_active: false })
+      .eq('id', templateId)
+
+    if (error) {
+      console.error('[DELETE /whs/certificate-templates/:id] Error:', error)
+      return c.json({ error: 'Failed to delete template', details: error.message }, 500)
+    }
+
+    return c.json({ message: 'Template deleted successfully' })
+  } catch (error: any) {
+    console.error('[DELETE /whs/certificate-templates/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Generate certificate from template
+whs.post('/certificates/generate', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const body = await c.req.json()
+    const { template_id, case_id, worker_id, certificate_data } = body
+
+    if (!template_id || !worker_id) {
+      return c.json({ error: 'Missing required fields: template_id, worker_id' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    // Fetch template
+    const { data: template, error: templateError } = await adminClient
+      .from('certificate_templates')
+      .select('*')
+      .eq('id', template_id)
+      .single()
+
+    if (templateError || !template) {
+      return c.json({ error: 'Template not found' }, 404)
+    }
+
+    // Fetch worker details
+    const { data: worker, error: workerError } = await adminClient
+      .from('users')
+      .select('id, email, first_name, last_name, full_name')
+      .eq('id', worker_id)
+      .single()
+
+    if (workerError || !worker) {
+      return c.json({ error: 'Worker not found' }, 404)
+    }
+
+    // Fetch case details if case_id provided
+    let caseDetails = null
+    if (case_id) {
+      const { data: caseData } = await adminClient
+        .from('worker_exceptions')
+        .select('*')
+        .eq('id', case_id)
+        .single()
+      caseDetails = caseData
+    }
+
+    // Prepare data for placeholder replacement
+    const workerName = worker.full_name || `${worker.first_name || ''} ${worker.last_name || ''}`.trim() || worker.email
+    const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+    
+    const placeholderData: Record<string, string> = {
+      '{{worker_name}}': workerName,
+      '{{worker_id}}': worker.id.substring(0, 8).toUpperCase(),
+      '{{worker_email}}': worker.email,
+      '{{issue_date}}': today,
+      '{{whs_name}}': (user as any).full_name || user.email,
+      ...certificate_data, // Allow custom data from frontend
+    }
+
+    // Add case-specific data if available
+    if (caseDetails) {
+      placeholderData['{{case_reference}}'] = `#${caseDetails.id.substring(0, 8).toUpperCase()}`
+      placeholderData['{{duty_type}}'] = caseDetails.return_to_work_duty_type || 'Full Duties'
+      placeholderData['{{return_date}}'] = caseDetails.return_to_work_date 
+        ? new Date(caseDetails.return_to_work_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+        : 'N/A'
+      placeholderData['{{incident_type}}'] = caseDetails.exception_type || 'N/A'
+      placeholderData['{{start_date}}'] = caseDetails.start_date 
+        ? new Date(caseDetails.start_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+        : 'N/A'
+    }
+
+    // Generate certificate HTML based on template mode
+    let htmlContent = ''
+    
+    // Helper function to convert image URLs to absolute proxy URLs
+    const getProxyImageUrl = (imageUrl: string | null): string | null => {
+      if (!imageUrl) return null
+      const proxyUrl = getCertificateImageProxyUrl(imageUrl) || imageUrl
+      // Convert relative proxy URLs to absolute URLs for display
+      if (proxyUrl.startsWith('/api/')) {
+        // In production, use the actual backend URL from environment
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000'
+        return `${backendUrl}${proxyUrl}`
+      }
+      return proxyUrl
+    }
+    
+    if (template.use_background_mode && template.background_image_url) {
+      // Background image mode - render with positioned text
+      // Get canvas dimensions from template styles or use default
+      // Canvas dimensions should match the actual image size used in the editor
+      const canvasDimensions = (template.styles as any)?.canvasDimensions || { width: 2000, height: 1414 }
+      const CANVAS_WIDTH = canvasDimensions.width || 2000
+      const CANVAS_HEIGHT = canvasDimensions.height || 1414
+      const bgImageUrl = getProxyImageUrl(template.background_image_url)
+      htmlContent = `
+        <div style="position: relative; width: ${CANVAS_WIDTH}px; height: ${CANVAS_HEIGHT}px; margin: 0 auto; font-family: Arial, sans-serif; display: block; overflow: hidden; box-sizing: border-box;">
+          <img src="${bgImageUrl}" style="width: ${CANVAS_WIDTH}px; height: ${CANVAS_HEIGHT}px; object-fit: fill; display: block; position: absolute; top: 0; left: 0; z-index: 1; margin: 0; padding: 0; border: none;" alt="Certificate Background" id="cert-bg-image" />
+          <div style="position: absolute; top: 0; left: 0; width: ${CANVAS_WIDTH}px; height: ${CANVAS_HEIGHT}px; pointer-events: none; box-sizing: border-box; z-index: 2; margin: 0; padding: 0;">
+      `
+      
+      // Add positioned text fields - use pixel positions (canvas is fixed at 2000x1414px)
+      const textPositions = template.text_positions || []
+      textPositions.forEach((pos: any) => {
+        const value = placeholderData[`{{${pos.field}}}`] || `{{${pos.field}}}`
+        htmlContent += `
+          <div style="
+            position: absolute;
+            left: ${pos.x}px;
+            top: ${pos.y}px;
+            font-size: ${pos.fontSize}px;
+            color: ${pos.color};
+            font-family: ${pos.fontFamily};
+            font-weight: ${pos.fontWeight || 'normal'};
+            text-align: ${pos.textAlign || 'left'};
+            white-space: nowrap;
+            pointer-events: auto;
+            z-index: 10;
+          ">${value}</div>
+        `
+      })
+      
+      // Add positioned logo - use pixel positions (canvas is fixed at 800px)
+      if (template.logo_url && template.logo_position) {
+        const logoPos = template.logo_position as any
+        const logoUrl = getProxyImageUrl(template.logo_url)
+        htmlContent += `
+          <img src="${logoUrl}" style="
+            position: absolute;
+            left: ${logoPos.x}px;
+            top: ${logoPos.y}px;
+            width: ${logoPos.width}px;
+            height: ${logoPos.height}px;
+            pointer-events: auto;
+            z-index: 10;
+          " alt="Logo" />
+        `
+      }
+      
+      // Add positioned signature - use pixel positions (canvas is fixed at 800px)
+      if (template.signature_image_url && template.signature_position) {
+        const sigPos = template.signature_position as any
+        const signatureUrl = getProxyImageUrl(template.signature_image_url)
+        htmlContent += `
+          <img src="${signatureUrl}" style="
+            position: absolute;
+            left: ${sigPos.x}px;
+            top: ${sigPos.y}px;
+            width: ${sigPos.width}px;
+            height: ${sigPos.height}px;
+            pointer-events: auto;
+            z-index: 10;
+          " alt="Signature" />
+        `
+      }
+      
+      htmlContent += `
+          </div>
+        </div>
+      `
+    } else {
+      // HTML mode - traditional placeholder replacement
+      htmlContent = template.html_content
+      
+      // Replace text placeholders
+      Object.entries(placeholderData).forEach(([placeholder, value]) => {
+        htmlContent = htmlContent.replace(new RegExp(placeholder, 'g'), value || '')
+      })
+      
+      // Replace image placeholders with actual images (using proxy URLs)
+      const imagePlaceholders: Record<string, string | null> = {
+        '{{logo_image}}': getProxyImageUrl(template.logo_url),
+        '{{header_image}}': getProxyImageUrl(template.header_image_url),
+        '{{footer_image}}': getProxyImageUrl(template.footer_image_url),
+        '{{signature_image}}': getProxyImageUrl(template.signature_image_url),
+      }
+      
+      Object.entries(imagePlaceholders).forEach(([placeholder, imageUrl]) => {
+        if (imageUrl) {
+          const imgTag = `<img src="${imageUrl}" style="max-width: 100%; height: auto; display: block; margin: 0 auto;" alt="${placeholder.replace(/[{}]/g, '')}" />`
+          htmlContent = htmlContent.replace(new RegExp(placeholder, 'g'), imgTag)
+        } else {
+          // Remove placeholder if no image
+          htmlContent = htmlContent.replace(new RegExp(placeholder, 'g'), '')
+        }
+      })
+    }
+
+    // Create generated certificate record
+    const { data: certificate, error: createError } = await adminClient
+      .from('generated_certificates')
+      .insert({
+        template_id: template.id,
+        template_name: template.name,
+        case_id: case_id || null,
+        worker_id: worker.id,
+        worker_name: workerName,
+        html_content: htmlContent,
+        certificate_data: placeholderData,
+        generated_by: user.id,
+      })
+      .select()
+      .single()
+
+    if (createError) {
+      console.error('[POST /whs/certificates/generate] Error:', createError)
+      return c.json({ error: 'Failed to generate certificate', details: createError.message }, 500)
+    }
+
+    return c.json({ certificate }, 201)
+  } catch (error: any) {
+    console.error('[POST /whs/certificates/generate] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get all generated certificates
+whs.get('/certificates', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const adminClient = getAdminClient()
+    const caseId = c.req.query('case_id') // Optional filter by case
+    const workerId = c.req.query('worker_id') // Optional filter by worker
+
+    let query = adminClient
+      .from('generated_certificates')
+      .select(`
+        *,
+        worker:users!generated_certificates_worker_id_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        ),
+        generated_by_user:users!generated_certificates_generated_by_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        )
+      `)
+      .eq('is_voided', false)
+      .order('generated_at', { ascending: false })
+
+    if (caseId) {
+      query = query.eq('case_id', caseId)
+    }
+
+    if (workerId) {
+      query = query.eq('worker_id', workerId)
+    }
+
+    const { data: certificates, error } = await query
+
+    if (error) {
+      console.error('[GET /whs/certificates] Error:', error)
+      return c.json({ error: 'Failed to fetch certificates', details: error.message }, 500)
+    }
+
+    return c.json({ certificates: certificates || [] })
+  } catch (error: any) {
+    console.error('[GET /whs/certificates] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Get single generated certificate
+whs.get('/certificates/:id', authMiddleware, requireRole(['whs_control_center', 'worker']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const certificateId = c.req.param('id')
+    const adminClient = getAdminClient()
+
+    let query = adminClient
+      .from('generated_certificates')
+      .select(`
+        *,
+        worker:users!generated_certificates_worker_id_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        ),
+        generated_by_user:users!generated_certificates_generated_by_fkey(
+          id,
+          email,
+          first_name,
+          last_name,
+          full_name
+        )
+      `)
+      .eq('id', certificateId)
+
+    // Workers can only view their own certificates
+    if (user.role === 'worker') {
+      query = query.eq('worker_id', user.id)
+    }
+
+    const { data: certificate, error } = await query.single()
+
+    if (error || !certificate) {
+      return c.json({ error: 'Certificate not found' }, 404)
+    }
+
+    return c.json({ certificate })
+  } catch (error: any) {
+    console.error('[GET /whs/certificates/:id] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Void a certificate
+whs.put('/certificates/:id/void', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  try {
+    const user = c.get('user')
+    if (!user) {
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    const certificateId = c.req.param('id')
+    const body = await c.req.json()
+    const { reason } = body
+
+    if (!reason) {
+      return c.json({ error: 'Void reason is required' }, 400)
+    }
+
+    const adminClient = getAdminClient()
+
+    const { data: certificate, error } = await adminClient
+      .from('generated_certificates')
+      .update({
+        is_voided: true,
+        voided_by: user.id,
+        voided_at: new Date().toISOString(),
+        void_reason: reason,
+      })
+      .eq('id', certificateId)
+      .select()
+      .single()
+
+    if (error) {
+      console.error('[PUT /whs/certificates/:id/void] Error:', error)
+      return c.json({ error: 'Failed to void certificate', details: error.message }, 500)
+    }
+
+    return c.json({ certificate })
+  } catch (error: any) {
+    console.error('[PUT /whs/certificates/:id/void] Error:', error)
+    return c.json({ error: 'Internal server error', details: error.message }, 500)
+  }
+})
+
+// Upload certificate image to R2
+whs.post('/certificates/upload-image', authMiddleware, requireRole(['whs_control_center']), async (c) => {
+  console.log('[POST /whs/certificates/upload-image] ===== ENDPOINT HIT =====')
+  
+  try {
+    console.log('[POST /whs/certificates/upload-image] Request received')
+    
+    const user = c.get('user')
+    if (!user) {
+      console.error('[POST /whs/certificates/upload-image] No user found')
+      return c.json({ error: 'Unauthorized' }, 401)
+    }
+
+    console.log('[POST /whs/certificates/upload-image] User:', user.id)
+
+    const body = await c.req.parseBody()
+    console.log('[POST /whs/certificates/upload-image] Body keys:', Object.keys(body))
+    
+    const file = body['file']
+    
+    if (!file) {
+      console.error('[POST /whs/certificates/upload-image] No file in body')
+      return c.json({ error: 'No file provided' }, 400)
+    }
+
+    // Check if file is a File object
+    if (typeof file === 'string') {
+      console.error('[POST /whs/certificates/upload-image] File is a string, not a File object')
+      return c.json({ error: 'Invalid file format' }, 400)
+    }
+
+    if (!('arrayBuffer' in file)) {
+      console.error('[POST /whs/certificates/upload-image] File does not have arrayBuffer method')
+      return c.json({ error: 'Invalid file format' }, 400)
+    }
+
+    const fileObj = file as File
+    console.log('[POST /whs/certificates/upload-image] File name:', fileObj.name, 'Type:', fileObj.type, 'Size:', fileObj.size)
+
+    // Validate file type
+    if (!fileObj.type.startsWith('image/')) {
+      return c.json({ error: 'File must be an image' }, 400)
+    }
+
+    // Validate file size (max 5MB)
+    if (fileObj.size > 5 * 1024 * 1024) {
+      return c.json({ error: 'File size must be less than 5MB' }, 400)
+    }
+
+    // Generate unique filename
+    const timestamp = Date.now()
+    const randomStr = Math.random().toString(36).substring(2, 8)
+    const ext = fileObj.name.split('.').pop() || 'jpg'
+    const imageId = `${timestamp}-${randomStr}.${ext}`
+    const filename = `certificates/${user.id}/${imageId}`
+
+    console.log('[POST /whs/certificates/upload-image] Uploading to R2:', filename)
+
+    // Upload to R2
+    const { uploadToR2 } = await import('../utils/r2Storage.js')
+    const arrayBuffer = await fileObj.arrayBuffer()
+    const buffer = Buffer.from(arrayBuffer)
+    
+    const r2Url = await uploadToR2(buffer, filename, fileObj.type)
+    console.log('[Certificate Image Upload] R2 URL:', r2Url)
+    
+    // Convert R2 URL to proxy URL to avoid DNS issues
+    const proxyUrl = getCertificateImageProxyUrl(r2Url)
+    console.log('[Certificate Image Upload] Proxy URL:', proxyUrl)
+
+    return c.json({ url: proxyUrl || r2Url }, 201)
+  } catch (error: any) {
+    console.error('[POST /whs/certificates/upload-image] ===== ERROR CAUGHT =====')
+    console.error('[POST /whs/certificates/upload-image] Error:', error)
+    console.error('[POST /whs/certificates/upload-image] Error message:', error?.message)
+    console.error('[POST /whs/certificates/upload-image] Stack:', error?.stack)
+    
+    // Try to return error response
+    try {
+      return c.json({ error: 'Failed to upload image', details: error?.message || 'Unknown error' }, 500)
+    } catch (responseError) {
+      console.error('[POST /whs/certificates/upload-image] Failed to send error response:', responseError)
+      throw error
+    }
   }
 })
 

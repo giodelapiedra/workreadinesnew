@@ -1255,16 +1255,21 @@ auth.patch('/profile', authMiddleware, async (c) => {
 
     // Handle gender and date_of_birth updates (no password required)
     // Prevent gender changes if already set
-    if (gender !== undefined) {
+    if (gender !== undefined && gender !== null) {
       // If gender is already set, prevent changes
       if (currentUserData.gender) {
-        return c.json({ error: 'Gender cannot be changed once set' }, 400)
+        // Silently ignore if trying to set the same gender, otherwise return error
+        if (gender !== currentUserData.gender) {
+          return c.json({ error: 'Gender cannot be changed once set' }, 400)
+        }
+        // If same gender, just skip the update
+      } else {
+        // Gender not set yet, validate and set it
+        if (gender !== 'male' && gender !== 'female') {
+          return c.json({ error: 'Gender must be either "male" or "female"' }, 400)
+        }
+        updates.gender = gender
       }
-      
-      if (gender !== 'male' && gender !== 'female') {
-        return c.json({ error: 'Gender must be either "male" or "female"' }, 400)
-      }
-      updates.gender = gender
     }
 
     if (date_of_birth !== undefined) {
