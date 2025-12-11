@@ -2298,7 +2298,8 @@ whs.post('/certificates/generate', authMiddleware, requireRole(['whs_control_cen
       // Convert relative proxy URLs to absolute URLs for display
       if (proxyUrl.startsWith('/api/')) {
         // In production, use the actual backend URL from environment
-        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000'
+        // BACKEND_URL should be set to your VPS backend URL (e.g., https://api.giodelapiedra.dev)
+        const backendUrl = process.env.BACKEND_URL || process.env.API_BASE_URL || 'http://localhost:3000'
         return `${backendUrl}${proxyUrl}`
       }
       return proxyUrl
