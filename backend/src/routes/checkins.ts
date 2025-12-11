@@ -4,6 +4,7 @@ import { authMiddleware, requireRole, AuthVariables } from '../middleware/auth.j
 import { getCaseStatusFromNotes } from '../utils/caseStatus.js'
 import { getAdminClient } from '../utils/adminClient.js'
 import { parseTime, compareTime, formatDateString, parseDateString, getTodayDateString, dateToDateString } from '../utils/dateTimeUtils.js'
+import { getCurrentTimeInTimezone, getCurrentDateInTimezone, getDateInTimezone, isValidTimezone } from '../shared/date/timezone.js'
 import { formatUserFullName } from '../utils/userUtils.js'
 import { sendCheckInNotificationToTeamLeader } from '../utils/notificationUtils.js'
 
@@ -176,7 +177,7 @@ function isWithinCheckInWindow(currentTime: string, windowStart: string, windowE
 // Helper: Get worker's shift info for a specific date (default: today)
 // ONLY uses individual worker schedules from worker_schedules table (created by Team Leader)
 // NO FALLBACK - Team Leader MUST assign individual schedules
-async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
+async function getWorkerShiftInfo(userId: string, targetDate?: Date, timezone?: string): Promise<{
   hasShift: boolean
   shiftType: 'morning' | 'afternoon' | 'night' | 'flexible'
   shiftStart?: string
@@ -186,13 +187,24 @@ async function getWorkerShiftInfo(userId: string, targetDate?: Date): Promise<{
 }> {
   const adminClient = getAdminClient()
   
-  // Get target date (use local date, not UTC, to match scheduled_date in database)
-  const target = targetDate || new Date()
-  // Get local date string (YYYY-MM-DD) to match database date format
-  const year = target.getFullYear()
-  const month = String(target.getMonth() + 1).padStart(2, '0')
-  const day = String(target.getDate()).padStart(2, '0')
-  const targetStr = `${year}-${month}-${day}`
+  // Get target date - use timezone-aware date if timezone is provided
+  let target: Date
+  if (timezone && isValidTimezone(timezone)) {
+    target = targetDate || getDateInTimezone(timezone)
+  } else {
+    target = targetDate || new Date()
+  }
+  
+  // Get date string (YYYY-MM-DD) - use timezone-aware date if timezone is provided
+  let targetStr: string
+  if (timezone && isValidTimezone(timezone)) {
+    targetStr = targetDate ? formatDateString(targetDate) : getCurrentDateInTimezone(timezone)
+  } else {
+    const year = target.getFullYear()
+    const month = String(target.getMonth() + 1).padStart(2, '0')
+    const day = String(target.getDate()).padStart(2, '0')
+    targetStr = `${year}-${month}-${day}`
+  }
 
   // PRIORITY 1: Check worker_schedules table first (individual worker schedules)
   // Check both single-date schedules and recurring schedules
@@ -687,11 +699,21 @@ checkins.get('/shift-info', authMiddleware, requireRole(['worker']), async (c) =
 
     console.log(`[GET /checkins/shift-info] Request from user: ${user.id} (${user.email}), role: ${user.role}`)
 
-    const shiftInfo = await getWorkerShiftInfo(user.id)
+    // Get timezone from query parameter (optional, for timezone-aware calculations)
+    const timezone = c.req.query('timezone')
+    if (timezone && !isValidTimezone(timezone)) {
+      return c.json({ error: 'Invalid timezone format' }, 400)
+    }
+
+    const shiftInfo = await getWorkerShiftInfo(user.id, undefined, timezone)
     
-    // Get current time
-    const now = new Date()
-    const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
+    // Get current time - use timezone if provided, otherwise use server time
+    const currentTime = timezone && isValidTimezone(timezone)
+      ? getCurrentTimeInTimezone(timezone)
+      : (() => {
+          const now = new Date()
+          return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
+        })()
     
     // Check if within window
     const isWithinWindow = isWithinCheckInWindow(
@@ -912,7 +934,7 @@ checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
       return c.json({ error: 'Forbidden: This endpoint is only accessible to workers' }, 403)
     }
 
-    const { painLevel, fatigueLevel, sleepQuality, stressLevel, additionalNotes, predictedReadiness } = await c.req.json()
+    const { painLevel, fatigueLevel, sleepQuality, stressLevel, additionalNotes, predictedReadiness, timezone } = await c.req.json()
 
     // Validate inputs
     if (
@@ -928,6 +950,11 @@ checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
       return c.json({ error: 'Invalid predicted readiness value' }, 400)
     }
 
+    // Validate timezone if provided
+    if (timezone && !isValidTimezone(timezone)) {
+      return c.json({ error: 'Invalid timezone format' }, 400)
+    }
+
     // Validate: Additional notes are required when "Not fit to work" (Red)
     if (predictedReadiness === 'Red' && (!additionalNotes || additionalNotes.trim() === '')) {
       return c.json({ 
@@ -935,12 +962,16 @@ checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
       }, 400)
     }
 
-    // Get shift info for this worker
-    const shiftInfo = await getWorkerShiftInfo(user.id)
+    // Get shift info for this worker (with timezone support)
+    const shiftInfo = await getWorkerShiftInfo(user.id, undefined, timezone)
     
-    // Get current time
-    const now = new Date()
-    const currentTime = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
+    // Get current time - use timezone if provided, otherwise use server time
+    const currentTime = timezone && isValidTimezone(timezone) 
+      ? getCurrentTimeInTimezone(timezone)
+      : (() => {
+          const now = new Date()
+          return `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`
+        })()
     
     // Check if within check-in window (soft validation - allow but warn)
     const isWithinWindow = isWithinCheckInWindow(
@@ -963,7 +994,10 @@ checkins.post('/submit', authMiddleware, requireRole(['worker']), async (c) => {
       .eq('user_id', user.id)
       .single()
 
-    const today = getTodayDateString()
+    // Get today's date - use timezone if provided, otherwise use server date
+    const today = timezone && isValidTimezone(timezone)
+      ? getCurrentDateInTimezone(timezone)
+      : getTodayDateString()
 
     // Insert or update check-in (one per day per user)
     const { data: checkIn, error: checkInError } = await adminClient

@@ -163,3 +163,14 @@ export function isDateInRange(checkDate: Date, startDate: Date, endDate: Date | 
  */
 export { calculateAge, MINIMUM_AGE, validateMinimumAge } from '../shared/date/age.js'
 
+/**
+ * @deprecated Import directly from '../shared/date/timezone' for new code
+ * Re-exported for backward compatibility
+ */
+export {
+  getCurrentTimeInTimezone,
+  getCurrentDateInTimezone,
+  getDateInTimezone,
+  isValidTimezone
+} from '../shared/date/timezone.js'
+
