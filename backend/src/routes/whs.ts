@@ -2301,12 +2301,40 @@ whs.post('/certificates/generate', authMiddleware, requireRole(['whs_control_cen
         // BACKEND_URL should be set to your VPS backend URL (e.g., https://api.giodelapiedra.dev or http://vps.giodelapiedra.dev:3000)
         let backendUrl = process.env.BACKEND_URL || process.env.API_BASE_URL
         
-        // If BACKEND_URL is not set, log warning and use localhost fallback
+        // If BACKEND_URL is not set, try to infer from request headers
         if (!backendUrl) {
-          console.error('[Certificate Generation] ⚠️ BACKEND_URL not set in environment variables!')
-          console.error('[Certificate Generation] Please add BACKEND_URL=http://vps.giodelapiedra.dev:3000 to your .env file')
-          console.error('[Certificate Generation] Using localhost fallback - this will cause CORS errors in production!')
-          backendUrl = 'http://localhost:3000'
+          // Try to get from request origin/referer (for production)
+          const origin = c.req.header('origin') || c.req.header('referer')
+          const host = c.req.header('host')
+          
+          if (origin) {
+            try {
+              const originUrl = new URL(origin)
+              // Use the same protocol and host from the request
+              backendUrl = `${originUrl.protocol}//${originUrl.host}`
+              console.warn('[Certificate Generation] BACKEND_URL not set, using inferred URL from request:', backendUrl)
+            } catch {
+              // If origin parsing fails, try host header
+              if (host) {
+                const protocol = c.req.header('x-forwarded-proto') || (process.env.NODE_ENV === 'production' ? 'https' : 'http')
+                backendUrl = `${protocol}://${host}`
+                console.warn('[Certificate Generation] BACKEND_URL not set, using inferred URL from host header:', backendUrl)
+              }
+            }
+          } else if (host) {
+            // Fallback to host header
+            const protocol = c.req.header('x-forwarded-proto') || (process.env.NODE_ENV === 'production' ? 'https' : 'http')
+            backendUrl = `${protocol}://${host}`
+            console.warn('[Certificate Generation] BACKEND_URL not set, using inferred URL from host header:', backendUrl)
+          }
+          
+          // Final fallback
+          if (!backendUrl) {
+            console.error('[Certificate Generation] ⚠️ BACKEND_URL not set in environment variables!')
+            console.error('[Certificate Generation] Please add BACKEND_URL=https://vps.giodelapiedra.dev to your .env file')
+            console.error('[Certificate Generation] Using localhost fallback - this will cause CORS errors in production!')
+            backendUrl = 'http://localhost:3000'
+          }
         }
         
         // Ensure URL has protocol (http:// or https://)
