@@ -2299,7 +2299,15 @@ whs.post('/certificates/generate', authMiddleware, requireRole(['whs_control_cen
       if (proxyUrl.startsWith('/api/')) {
         // In production, use the actual backend URL from environment
         // BACKEND_URL should be set to your VPS backend URL (e.g., https://api.giodelapiedra.dev or http://vps.giodelapiedra.dev:3000)
-        let backendUrl = process.env.BACKEND_URL || process.env.API_BASE_URL || 'http://localhost:3000'
+        let backendUrl = process.env.BACKEND_URL || process.env.API_BASE_URL
+        
+        // If BACKEND_URL is not set, log warning and use localhost fallback
+        if (!backendUrl) {
+          console.error('[Certificate Generation] ⚠️ BACKEND_URL not set in environment variables!')
+          console.error('[Certificate Generation] Please add BACKEND_URL=http://vps.giodelapiedra.dev:3000 to your .env file')
+          console.error('[Certificate Generation] Using localhost fallback - this will cause CORS errors in production!')
+          backendUrl = 'http://localhost:3000'
+        }
         
         // Ensure URL has protocol (http:// or https://)
         // If user provided just domain (e.g., vps.giodelapiedra.dev), add http://
